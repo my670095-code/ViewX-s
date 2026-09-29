@@ -5401,7 +5401,8 @@ RENDERERS.opening = function(){
             <option value="">All Stores</option>
             ${myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('')}
         </select>
-        ${canCreate ? `<button class="btn-primary" onclick="openOpeningSetup()">+ New Opening</button>` : ''}
+             ${canCreate ? `<button class="btn-primary" onclick="openOpeningSetup()">+ New Opening</button>` : ''}
+        ${canCreate ? `<button class="btn-light" onclick="openOpeningImportModal()">📥 Import from Excel</button>` : ''}
     </div>
     ${myStores.length === 0 && canCreate ? `<div class="warn-box">⚠ No stores in your scope yet. Ask an admin to assign you to a store, or add stores in <b>Store Master</b>.</div>` : ''}
     <div class="panel">
@@ -5567,6 +5568,269 @@ function viewOpening(id){
     `;
     document.getElementById('modalFooter').innerHTML = `<button class="btn-light" onclick="closeModal()">Close</button>`;
     document.getElementById('modalOverlay').classList.add('show');
+}
+    
+/* ============================================================
+   OPENING STOCK — Import from Excel
+   File format: any Excel with a header row containing
+   "SKU" and "Opening Count" columns. Rows above the header
+   (metadata) are skipped. Extra columns ignored.
+   ============================================================ */
+let _openImportParsed = null;
+
+function openOpeningImportModal(){
+    if (!can('createOpening')) { toast('Access denied.', 'error'); return; }
+    const u = currentUser();
+    const myStores = getMyStoreObjects(u);
+    if (myStores.length === 0) { toast('No stores in scope.', 'error'); return; }
+    if (DB.items.length === 0) { toast('Add items first.', 'error'); return; }
+
+    _openImportParsed = null;
+
+    const months = getAvailableMonths();
+    const defaultMonth = getCurrentMonthTag();
+    const storeOptions = myStores.length === 1
+        ? `<option value="${myStores[0].id}" selected>${esc(storeLabel(myStores[0].id))}</option>`
+        : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
+
+    openModal('Import Opening Stock from Excel', `
+        <div class="info-block">
+            <b>How it works:</b> Upload any Excel that has a header row containing
+            <code>SKU</code> and <code>Opening Count</code> columns.
+            Rows above the header (metadata) are ignored.
+            <br><br>
+            Each SKU is matched against <b>Item Master</b>. Rows with unknown SKUs are rejected.
+        </div>
+
+        <div class="form-grid">
+            <div class="form-row">
+                <label>Month <span style="color:#dc2626">*</span></label>
+                <select id="openImpMonth">
+                    ${months.map(m => `<option value="${m}" ${m===defaultMonth?'selected':''}>${m}</option>`).join('')}
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Date <span style="color:#dc2626">*</span></label>
+                <input type="date" id="openImpDate" value="${todayISO()}">
+            </div>
+        </div>
+
+        <div class="form-row">
+            <label>Store <span style="color:#dc2626">*</span></label>
+            <select id="openImpStore">${storeOptions}</select>
+        </div>
+
+        <div class="upload-drop" onclick="document.getElementById('openImpFile').click()">
+            <div class="upload-icon">📊</div>
+            <div class="upload-text">Click to upload Excel</div>
+            <div class="upload-hint">.xlsx, .xls, .csv — must contain SKU + Opening Count columns</div>
+        </div>
+        <input type="file" id="openImpFile" class="upload-file" accept=".xlsx,.xls,.csv"
+               onchange="handleOpeningImportFile(event)">
+        <div id="openImpPreview" style="margin-top:16px"></div>
+    `, `
+        <button class="btn-light" onclick="closeModal()">Cancel</button>
+        <button class="btn-primary" id="openImpConfirmBtn" onclick="confirmOpeningImport()" disabled>Import</button>
+    `);
+}
+
+async function handleOpeningImportFile(evt){
+    const file = evt.target.files[0];
+    if (!file) return;
+    if (!XLSX_READY) { toast('Excel library still loading. Try again in 2 seconds.', 'error'); evt.target.value=''; return; }
+
+    const reader = new FileReader();
+    reader.onload = function(e){
+        try {
+            const data = new Uint8Array(e.target.result);
+            const wb = XLSX.read(data, { type:'array', cellDates: true });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
+            parseOpeningImport(aoa, file.name);
+        } catch(err) {
+            toast('Parse failed: ' + err.message, 'error');
+        }
+    };
+    reader.readAsArrayBuffer(file);
+    evt.target.value = '';
+}
+
+function parseOpeningImport(aoa, filename){
+    if (!aoa || aoa.length === 0) { toast('File is empty', 'error'); return; }
+
+    const normCell = s => String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
+
+    let headerIdx = -1;
+    let skuCol = -1, qtyCol = -1, uomCol = -1;
+
+    for (let r = 0; r < aoa.length; r++) {
+        const row = aoa[r] || [];
+        const lowered = row.map(normCell);
+        const sIdx = lowered.findIndex(c => c === 'sku');
+        const qIdx = lowered.findIndex(c => c.includes('opening') && c.includes('count'));
+        if (sIdx >= 0 && qIdx >= 0) {
+            headerIdx = r;
+            skuCol = sIdx;
+            qtyCol = qIdx;
+            uomCol = lowered.findIndex(c => c === 'storageuom' || c === 'uom' || c === 'unit');
+            break;
+        }
+    }
+
+    if (headerIdx < 0) {
+        toast('Could not find a header row with "SKU" and "Opening Count" columns.', 'error');
+        return;
+    }
+
+    const itemByCode = new Map();
+    DB.items.forEach(i => itemByCode.set(String(i.code).trim().toLowerCase(), i));
+
+    const valid   = [];
+    const rejects = [];
+    const skippedZero = [];
+    const seen = new Set();
+
+    for (let r = headerIdx + 1; r < aoa.length; r++) {
+        const row = aoa[r] || [];
+        const skuRaw = String(row[skuCol] ?? '').trim();
+        const qtyRaw = row[qtyCol];
+
+        if (!skuRaw && (qtyRaw === '' || qtyRaw === undefined || qtyRaw === null)) continue;
+
+        const lineNo = r + 1;
+
+        if (!skuRaw) { rejects.push({ line: lineNo, reason: 'Missing SKU' }); continue; }
+
+        const sku = skuRaw.replace(/[^a-zA-Z0-9._-]/g, '');
+        if (seen.has(sku)) { rejects.push({ line: lineNo, reason: `Duplicate SKU "${sku}"` }); continue; }
+        seen.add(sku);
+
+        const item = itemByCode.get(sku.toLowerCase());
+        if (!item) { rejects.push({ line: lineNo, reason: `SKU "${sku}" not found in Item Master` }); continue; }
+
+        const qty = Number(qtyRaw);
+        if (isNaN(qty)) { rejects.push({ line: lineNo, reason: `Invalid Opening Count "${qtyRaw}" for ${sku}` }); continue; }
+
+        valid.push({
+            itemId: item.id,
+            itemCode: item.code,
+            itemName: item.name,
+            qty: qty,
+            uom: (uomCol >= 0 && String(row[uomCol]||'').trim()) || item.uom || 'PCS'
+        });
+        if (qty === 0) skippedZero.push(sku);
+    }
+
+    _openImportParsed = { valid, rejects, filename, skippedZero };
+
+    const preview = document.getElementById('openImpPreview');
+    const sample = valid.slice(0, 12);
+    const totalValue = valid.reduce((s, r) => {
+        const it = getItem(r.itemId);
+        return s + (Number(r.qty) || 0) * (it ? (it.cost || 0) : 0);
+    }, 0);
+
+    preview.innerHTML = `
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:10px">
+            <b>File:</b> ${esc(filename)}<br>
+            <b>Header found at row:</b> ${headerIdx + 1} ·
+            <b>SKU column:</b> ${skuCol + 1} ·
+            <b>Opening Count column:</b> ${qtyCol + 1}
+            <br>
+            <span class="green"><b>${valid.length}</b> valid rows</span>
+            ${rejects.length ? ` · <span class="red"><b>${rejects.length}</b> rejected</span>` : ''}
+            ${skippedZero.length ? ` · <span style="color:#6b7280">${skippedZero.length} zero-qty rows</span>` : ''}
+            · <b>Total value: SAR ${fmtNum(totalValue)}</b>
+        </div>
+        ${sample.length > 0 ? `
+        <div style="max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+            <table style="font-size:12px">
+                <thead><tr><th>SKU</th><th>Item Name</th><th style="text-align:right">Opening Qty</th><th>UOM</th></tr></thead>
+                <tbody>${sample.map(r => `
+                    <tr>
+                        <td>${esc(r.itemCode)}</td>
+                        <td>${esc(r.itemName)}</td>
+                        <td style="text-align:right">${fmtNum(r.qty)}</td>
+                        <td>${esc(r.uom)}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+        </div>
+        ${valid.length > 12 ? `<p style="font-size:12px;color:#6b7280;margin-top:6px">…and ${valid.length - 12} more rows</p>` : ''}
+        ` : ''}
+        ${rejects.length > 0 ? `
+            <div style="margin-top:10px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px;font-size:12px;max-height:180px;overflow-y:auto">
+                <b style="color:#b91c1c">Rejected rows:</b>
+                ${rejects.slice(0,30).map(r => `<div>Line ${r.line}: ${esc(r.reason)}</div>`).join('')}
+                ${rejects.length > 30 ? `<div>…and ${rejects.length - 30} more</div>` : ''}
+            </div>` : ''}
+    `;
+
+    const btn = document.getElementById('openImpConfirmBtn');
+    if (btn) btn.disabled = valid.length === 0;
+}
+
+async function confirmOpeningImport(){
+    const p = _openImportParsed;
+    if (!p) { toast('No file loaded', 'error'); return; }
+    if (p.valid.length === 0) { toast('No valid rows', 'error'); return; }
+
+    const u = currentUser();
+    const month = document.getElementById('openImpMonth').value;
+    const date  = document.getElementById('openImpDate').value;
+    const storeId = document.getElementById('openImpStore').value;
+
+    if (!month || !date || !storeId) { toast('Month, Date, and Store are required', 'error'); return; }
+    if (!isInScope(storeId, u)) { toast('Access denied.', 'error'); return; }
+    if (isMonthClosed(storeId, month)) { toast(`${month} is closed for this store.`, 'error'); return; }
+
+    const existing = DB.openingStock.find(o =>
+        o.storeId === storeId && o.month === month && o.status === 'Posted'
+    );
+    if (existing) {
+        if (!confirm(
+            `⚠ An opening already exists for this store and month:\n\n` +
+            `  ${existing.id} — ${existing.month} — ${storeLabel(existing.storeId)}\n\n` +
+            `Do you want to add ANOTHER one?`
+        )) return;
+    }
+
+    const btn = document.getElementById('openImpConfirmBtn');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+
+    try {
+        const id = nextMovementId('OPN', DB.openingStock, date);
+        const rec = {
+            id,
+            storeId,
+            month,
+            date,
+            byId: u.id,
+            byName: u.name,
+            status: 'Posted',
+            rolledFrom: null,
+            createdAt: nowISO(),
+            lines: p.valid.map(r => ({ itemId: r.itemId, qty: r.qty, uom: r.uom }))
+        };
+
+        await DataLayer.insertOpening(rec);
+        DB.openingStock.push(rec);
+
+        audit('IMPORT','opening', id, {
+            file: p.filename, rows: p.valid.length,
+            rejected: p.rejects.length, store: storeId, month
+        });
+
+        _openImportParsed = null;
+        closeModal();
+        toast(`Opening ${id} imported — ${p.valid.length} items`, 'success');
+        showPage('opening');
+    } catch(err) {
+        btn.disabled = false;
+        btn.textContent = 'Import';
+        toast('Import failed: ' + (err.message || err), 'error');
+    }
 }
 
 /* ---------- PURCHASES ---------- */
