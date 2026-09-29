@@ -3833,7 +3833,7 @@ function openOpeningImportModal(){
         : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
     openModal('Import Opening Stock from Excel', `
         <div class="info-block">
-            <b>How it works:</b> Upload any Excel with a header row containing <code>SKU</code> and <code>Opening Count</code> columns.
+                        <b>How it works:</b> Upload any Excel with a header row containing <code>SKU</code> and <code>Counted</code> columns.
         </div>
         <div class="form-grid">
             <div class="form-row"><label>Month *</label>
@@ -3879,14 +3879,14 @@ function parseOpeningImport(aoa, filename){
         const row = aoa[r] || [];
         const lowered = row.map(normCell);
         const sIdx = lowered.findIndex(c => c === 'sku');
-        const qIdx = lowered.findIndex(c => c.includes('opening') && c.includes('count'));
+        const qIdx = lowered.findIndex(c => c === 'counted');
         if (sIdx >= 0 && qIdx >= 0) {
             headerIdx = r; skuCol = sIdx; qtyCol = qIdx;
             uomCol = lowered.findIndex(c => c === 'storageuom' || c === 'uom' || c === 'unit');
             break;
         }
     }
-    if (headerIdx < 0) { toast('No header row with "SKU" and "Opening Count" found.', 'error'); return; }
+    if (headerIdx < 0) { toast('No header row with "SKU" and "Counted" found.', 'error'); return; }
     const itemByCode = new Map();
     DB.items.forEach(i => itemByCode.set(String(i.code).trim().toLowerCase(), i));
     const valid = [], rejects = [], skippedZero = [];
@@ -3904,7 +3904,7 @@ function parseOpeningImport(aoa, filename){
         const item = itemByCode.get(sku.toLowerCase());
         if (!item) { rejects.push({ line: lineNo, reason: `SKU "${sku}" not in Item Master` }); continue; }
         const qty = Number(qtyRaw);
-        if (isNaN(qty)) { rejects.push({ line: lineNo, reason: `Invalid Opening Count "${qtyRaw}"` }); continue; }
+                if (isNaN(qty)) { rejects.push({ line: lineNo, reason: `Invalid Counted "${qtyRaw}"` }); continue; }
         valid.push({
             itemId: item.id, itemCode: item.code, itemName: item.name, qty,
             uom: (uomCol >= 0 && String(row[uomCol]||'').trim()) || item.uom || 'PCS'
