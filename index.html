@@ -719,24 +719,49 @@ const DataLayer = {
     },
 
     async submitJournal(journal) {
-        if (CLOUD_MODE === 'local') return journal;
-        const { data, error } = await SB.rpc('submit_journal', {
-            p_header: {
-                id: journal.id,
-                store_id: journal.storeId,
-                type: journal.type,
-                date: journal.date,
-                month: journal.month,
-                week: '',
-                by_id: journal.byId || '',
-                by_name: journal.byName,
-                status: journal.status || 'Submitted'
-            },
-            p_lines: journal.lines
-        });
-        if (error) throw error;
-        return data;
-    },
+    if (CLOUD_MODE === 'local') return journal;
+
+    // 1. Upsert header
+    const { error: e1 } = await SB.from('journals').upsert({
+        id: journal.id,
+        store_id: journal.storeId,
+        type: journal.type,
+        date: journal.date,
+        month: journal.month,
+        week: null,
+        by_id: journal.byId || null,
+        by_name: journal.byName,
+        status: journal.status || 'Submitted'
+    }, { onConflict: 'id' });
+    if (e1) throw e1;
+
+    // 2. Delete old lines (in case of resubmit)
+    const { error: e2 } = await SB.from('journal_lines').delete().eq('journal_id', journal.id);
+    if (e2) throw e2;
+
+    // 3. Insert lines
+    if (journal.lines && journal.lines.length > 0) {
+        const rows = journal.lines.map(l => ({
+            journal_id: journal.id,
+            journal_date: journal.date,
+            item_id: l.itemId,
+            uom: l.uom,
+            opening: l.opening || 0,
+            purchases: 0,
+            transfers_in: 0,
+            transfers_out: 0,
+            consumption: l.consumption || 0,
+            expected: l.expected || 0,
+            physical: l.physical || 0,
+            variance: l.variance || 0,
+            mtd_purchases: 0,
+            mtd_consumption: l.mtdConsumption || 0
+        }));
+        const { error: e3 } = await SB.from('journal_lines').insert(rows);
+        if (e3) throw e3;
+    }
+    return { id: journal.id, status: 'ok' };
+}
 
     subscribeToChanges(user, onJournalChange) {
         if (CLOUD_MODE === 'local' || !SB) return null;
