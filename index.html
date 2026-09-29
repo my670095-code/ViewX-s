@@ -718,25 +718,25 @@ const DataLayer = {
         }
     },
 
- async submitJournal(journal) {
-    if (CLOUD_MODE === 'local') return journal;
-    const { data, error } = await SB.rpc('submit_journal', {
-        p_header: {
-            id: journal.id,
-            store_id: journal.storeId,
-            type: journal.type,
-            date: journal.date,
-            month: journal.month,
-            week: '',
-            by_id: journal.byId || '',
-            by_name: journal.byName,
-            status: journal.status || 'Submitted'
-        },
-        p_lines: journal.lines
-    });
-    if (error) throw error;
-    return data;
-}
+    async submitJournal(journal) {
+        if (CLOUD_MODE === 'local') return journal;
+        const { data, error } = await SB.rpc('submit_journal', {
+            p_header: {
+                id: journal.id,
+                store_id: journal.storeId,
+                type: journal.type,
+                date: journal.date,
+                month: journal.month,
+                week: '',
+                by_id: journal.byId || '',
+                by_name: journal.byName,
+                status: journal.status || 'Submitted'
+            },
+            p_lines: journal.lines
+        });
+        if (error) throw error;
+        return data;
+    },
 
     subscribeToChanges(user, onJournalChange) {
         if (CLOUD_MODE === 'local' || !SB) return null;
@@ -993,7 +993,7 @@ function clearSession(){ sessionStorage.removeItem(SESSION_KEY); }
 function can(action){ const u = currentUser(); return u && ACTIONS[action] && ACTIONS[action].includes(u.role); }
 function canPage(page){ const u = currentUser(); return u && PERMISSIONS[u.role] && PERMISSIONS[u.role].includes(page); }
 function isAdmin(){ const u = currentUser(); return u && u.role==='admin'; }
-    
+
 /* ---------- LOGIN ---------- */
 async function doLogin(){
     try {
@@ -4216,3 +4216,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 </body>
 </html>
+
+
+
+
+
+    
