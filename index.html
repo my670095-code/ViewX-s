@@ -337,18 +337,20 @@ const PERMISSIONS = {
 };
 
 const ACTIONS = {
-    createOpening:     ['admin','opmanager','area','store'],
-    uploadSales:       ['admin','opmanager','area','store','wh'],
-    createInventory:   ['admin','opmanager','area','store'],
-    createItem:        ['admin'],
-    createBOM:         ['admin'],
-    createStore:       ['admin'],
-    createEmployee:    ['admin'],
-    manageUsers:       ['admin'],
-    deleteRecord:      ['admin'],
-    editRecord:        ['admin'],
-    manageRecycleBin:  ['admin'],
-    backupRestore:     ['admin']
+    createOpening:       ['admin','opmanager','area','store'],
+    uploadSales:         ['admin','opmanager','area','store','wh'],
+    createInventory:     ['admin','opmanager','area','store'],
+    createSurpriseAudit: ['admin','opmanager','area'],   // ← NEW
+    acknowledgeAudit:    ['admin','store'],              // ← NEW
+    createItem:          ['admin'],
+    createBOM:           ['admin'],
+    createStore:         ['admin'],
+    createEmployee:      ['admin'],
+    manageUsers:         ['admin'],
+    deleteRecord:        ['admin'],
+    editRecord:          ['admin'],
+    manageRecycleBin:    ['admin'],
+    backupRestore:       ['admin']
 };
 
 function defaultData(){
@@ -1381,7 +1383,8 @@ function badge(status){
         'Rolled':'purple','Admin':'red','Operation Manager':'cyan','Area Manager':'blue','Store Manager':'green',
         'Warehouse':'orange','Viewer':'gray','Void':'gray','Pending':'orange','Rejected':'red',
         'In Progress':'orange','Review':'orange','Draft':'orange','Surplus':'green','Loss':'red',
-        'Scheduled':'blue','Under Review':'blue','Critical':'red','Inactive':'gray','Locked':'orange'
+'Scheduled':'blue','Under Review':'blue','Critical':'red','Inactive':'gray','Locked':'orange',
+'Awaiting Store':'orange','Acknowledged':'green'
     };
     return `<span class="badge badge-${map[status]||'gray'}">${esc(status)}</span>`;
 }
@@ -1445,38 +1448,75 @@ function sumMTDConsumption(storeId, itemId, journal){
     });
     return sum;
 }
+/* ══════════════════════════════════════════════════════════════
+   NEW v2.0: Build count lines from an audit's own opening snapshot.
+   - Opening comes ONLY from the audit's opening upload
+   - No carry-forward, no month-opening fallback
+   - Item list = union of (opening items) + (items consumed that day)
+   - Physical starts blank (null), not zero
+   ══════════════════════════════════════════════════════════════ */
 function buildCountLines(journal){
     const storeId = journal.storeId;
-    const monthTag = journal.month;
-    const items = DB.items.filter(it => it.status === 'Active' && it.daily);
+    const auditDate = journal.date;
+    const openingLines = journal.openingLines || [];   // [{ itemId, qty, uom }]
 
-    const lastJ = getLastJournalForStore(storeId, journal.createdAt || nowISO());
+    // Build a map: itemId -> opening qty (from this audit's opening upload)
+    const openingMap = new Map();
+    openingLines.forEach(l => {
+        openingMap.set(l.itemId, { qty: Number(l.qty) || 0, uom: l.uom });
+    });
 
-    const lines = items.map(it => {
-        let opening;
-        if (lastJ) {
-            const line = lastJ.lines.find(l => l.itemId === it.id);
-            opening = line ? Number(line.physical) || 0 : 0;
-        } else {
-            const op = getMonthOpening(storeId, it.id, monthTag);
-            opening = op ? Number(op.qty) || 0 : 0;
-        }
-        const consumption = sumConsumptionTagged(storeId, it.id, journal);
+    // Sum consumption for that specific store + date
+    const consumptionMap = new Map();
+    DB.consumptionLedger.forEach(c => {
+        if (c.storeId !== storeId) return;
+        if (c.date !== auditDate) return;
+        c.lines.forEach(l => {
+            const prev = consumptionMap.get(l.itemId) || 0;
+            consumptionMap.set(l.itemId, prev + (Number(l.qty) || 0));
+        });
+    });
+
+    // Union of both sets
+    const allItemIds = new Set([...openingMap.keys(), ...consumptionMap.keys()]);
+
+    const lines = [];
+    allItemIds.forEach(itemId => {
+        const item = getItem(itemId);
+        if (!item || item.status !== 'Active') return;
+
+        const openRec = openingMap.get(itemId);
+        const opening = openRec ? openRec.qty : 0;
+        const consumption = consumptionMap.get(itemId) || 0;
         const expected = opening - consumption;
-        const mtdCons = sumMTDConsumption(storeId, it.id, journal);
-        return {
-            itemId: it.id, uom: it.uom,
+        const uom = openRec?.uom || item.uom;
+
+        lines.push({
+            itemId,
+            uom,
             opening,
             purchases: 0,
             transfersIn: 0, transfersOut: 0,
-            consumption, expected,
-            physical: 0, variance: 0,
+            consumption,
+            expected,
+            physical: null,           // ← blank, not zero
+            variance: 0,
             mtdPurchases: 0,
             mtdTransfersIn: 0, mtdTransfersOut: 0,
-            mtdConsumption: mtdCons
-        };
+            mtdConsumption: consumption,
+            store_remark: '',
+            store_remark_by: null,
+            store_remark_at: null
+        });
     });
-    return { lines, openingSource: lastJ ? { source:'previous-journal', journal:lastJ } : { source:'month-opening' } };
+
+    // Sort by item code for readability
+    lines.sort((a, b) => {
+        const ia = getItem(a.itemId), ib = getItem(b.itemId);
+        return String(ia?.code || '').localeCompare(String(ib?.code || ''));
+    });
+
+    return { lines, openingSource: { source: 'audit-opening-upload', count: openingLines.length } };
 }
 function deleteBtn(entityType, id){
     if (!isAdmin()) return '';
@@ -3407,61 +3447,47 @@ function viewSalesUpload(id){
     document.getElementById('modalOverlay').classList.add('show');
 }
 
-/* ---------- DAILY INVENTORY ---------- */
-function renderCountPage(){
-    const u = currentUser();
-    const canCreate = can('createInventory');
-    const myStoreIds = new Set(getMyStores(u));
-    const myStores = DB.stores.filter(s => myStoreIds.has(s.id));
-    let journals = DB.journals.filter(j => j.type === 'daily' && myStoreIds.has(j.storeId));
-    return `
-    <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
-        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:11px 14px;margin-bottom:16px;font-size:12.5px;color:#1e40af">
-        <b>Rule:</b> Opening = previous surprise check's Physical (or manual Opening Stock if none). Consumption matched to <b>Surprise + date</b>.
-    </div>
-    <div class="toolbar">
-        <select id="dailyStoreFilter" onchange="filterJournals()">
-            <option value="">All Stores (in scope)</option>
-            ${myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('')}
-        </select>
-        ${canCreate ? `<button class="btn-primary" onclick="openCountSetup()">+ New Surprise Inv Check</button>` : ''}
-    </div>
-    ${myStores.length === 0 && canCreate ? `<div class="warn-box">⚠ No stores in your scope yet.</div>` : ''}
-    <div class="panel">
-       <div class="panel-header"><div class="panel-title">Surprise Inventory Checks</div>
-        <span class="badge badge-blue">${journals.length} journals</span></div>
-        <div class="panel-body" id="dailyListBody">${renderCountList(journals)}</div>
-    </div>`;
-}
 function renderCountList(rows){
-    if (rows.length === 0) return '<div class="empty">No journals in scope</div>';
+    if (rows.length === 0) return '<div class="empty">No audits in scope</div>';
+    const u = currentUser();
+    const isStoreUser = u.role === 'store';
+
     return `<table>
-        <thead><tr><th>Journal No.</th><th>Date</th><th>Month</th><th>Store</th>
-        <th>Items</th><th>Variance</th><th>Value</th><th>By</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr>
+            <th>Audit No.</th><th>Date</th><th>Store</th>
+            <th>Items</th><th>Variance</th><th>Value</th>
+            <th>By</th><th>Stage</th><th>Actions</th>
+        </tr></thead>
         <tbody>${rows.slice().reverse().map(j => {
+            const stage = j.auditStage || j.audit_stage || 'submitted';
             const tv = j.lines.reduce((s,l) => s + (l.variance||0), 0);
             const val = j.lines.reduce((s,l) => { const it = getItem(l.itemId); return s + ((l.variance||0) * (it?it.cost:0)); }, 0);
+            const stageBadge = stage === 'awaiting_store'
+                ? '<span class="badge badge-orange">Awaiting Store</span>'
+                : stage === 'acknowledged'
+                    ? '<span class="badge badge-green">Acknowledged</span>'
+                    : '<span class="badge badge-blue">Submitted</span>';
+
+            const canRespond = isStoreUser && stage === 'awaiting_store';
+            const canViewOnly = !canRespond;
+
             return `<tr>
-                <td><b>${esc(j.id)}</b></td><td>${esc(j.date)}</td><td>${esc(j.month||'—')}</td>
+                <td><b>${esc(j.id)}</b></td>
+                <td>${esc(j.date)}</td>
                 <td>${esc(storeLabel(j.storeId))}</td>
                 <td>${j.lines.length}</td>
                 <td class="${tv>0?'red':tv<0?'green':''}">${tv>0?'+':''}${fmtNum(tv)}</td>
                 <td class="${val>0?'red':val<0?'green':''}">SAR ${fmtNum(val)}</td>
-                <td>${esc(j.byName)}</td><td>${badge(j.status)}</td>
+                <td>${esc(j.byName)}</td>
+                <td>${stageBadge}</td>
                 <td class="actions-cell">
-                    <button class="btn-light btn-xs" onclick="viewCount('${j.id}')">View</button>
+                    ${canRespond
+                        ? `<button class="btn-warn btn-xs" onclick="openAcknowledgeSheet('${j.id}')">Respond</button>`
+                        : `<button class="btn-light btn-xs" onclick="viewCount('${j.id}')">View</button>`}
                     ${deleteBtn('journal', j.id)}
                 </td></tr>`;
         }).join('')}</tbody></table>`;
 }
-function filterJournals(){
-    const sf = document.getElementById('dailyStoreFilter').value;
-    const myStoreIds = new Set(getMyStores());
-    let rows = DB.journals.filter(j => j.type === 'daily' && myStoreIds.has(j.storeId));
-    if (sf) rows = rows.filter(j => j.storeId === sf);
-    document.getElementById('dailyListBody').innerHTML = renderCountList(rows);
-}
-RENDERERS.daily = () => renderCountPage();
 
 function findDuplicateJournal(journal){
     return DB.journals.find(j =>
