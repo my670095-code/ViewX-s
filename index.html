@@ -4187,14 +4187,15 @@ function exportViewExcel(id){
     if (!j) return;
     if (typeof XLSX === 'undefined') { toast('Excel library not ready', 'error'); return; }
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
-    let rows = j.lines.map(l => {
-        const it = getItem(l.itemId);
-        return {
-            code: it?it.code:'', name: it?it.name:'Unknown', uom: l.uom,
-            opening: l.opening, consumption: l.consumption,
-            expected: l.expected, physical: l.physical, variance: l.variance||0
-        };
-    });
+  let rows = j.lines.map(l => {
+    const it = getItem(l.itemId);
+    return {
+        code: it?it.code:'', name: it?it.name:'Unknown', uom: l.uom,
+        opening: l.opening, consumption: l.consumption,
+        expected: l.expected, physical: l.physical, variance: l.variance||0,
+        store_remark: l.storeRemark || l.store_remark || ''
+    };
+});
     if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
     const s = window._viewSort || { key:'code', dir:1 };
     rows.sort((a,b) => {
@@ -4265,20 +4266,7 @@ const newLines = rebuilt.lines
         };
     })
     .filter(l => l.physical !== 0 && l.physical !== null && !isNaN(l.physical));
-        const phys = oldPhysical[l.itemId] !== undefined ? oldPhysical[l.itemId] : 0;
-        return {
-            itemId: l.itemId,
-            uom: l.uom,
-            opening: l.opening,
-            purchases: 0,
-            transfersIn: 0, transfersOut: 0,
-            consumption: l.consumption,
-            expected: l.expected,
-            physical: phys,
-            variance: phys - l.expected,
-            mtdPurchases: 0,
-            mtdConsumption: l.mtdConsumption
-        };
+   
     });
     try {
         if (CLOUD_MODE === 'supabase') {
