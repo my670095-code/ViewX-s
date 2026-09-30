@@ -3235,21 +3235,25 @@ RENDERERS.sales = function(){
     let rows = DB.salesUploads.filter(s => myStoreIds.has(s.storeId)).slice().reverse();
     const defaultDate = todayISO();
     setTimeout(() => { try { applySalesPrefill(); } catch(e){} }, 0);
-    return `
+     return `
     <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
     <div class="info-block">
-        <b>How it works:</b> Upload sales Excel with columns
+        <b>How it works:</b> Select a store, then upload sales Excel with columns
         <code>Store Code</code> · <code>Product ID</code> · <code>Qty</code>.
-       Sales are exploded through BOMs and posted as <b>Surprise</b> consumption.
+        Sales are exploded through BOMs and posted as <b>Surprise</b> consumption.
     </div>
     ${canUpload ? `
     <div class="panel">
         <div class="panel-header"><div class="panel-title">Upload Sales Excel</div></div>
         <div class="panel-body">
-            <div class="upload-options">
+            <div class="upload-options" style="grid-template-columns:1fr 1fr">
                 <div class="form-row">
                     <label>Batch Date</label>
                     <input type="date" id="salesBatchDate" value="${defaultDate}">
+                </div>
+                <div class="form-row">
+                    <label>Store <span style="color:#dc2626">*</span></label>
+                    ${storePickerHTML('salesUploadStore', '', 'Search store by code or name...')}
                 </div>
             </div>
             <div id="salesTagPreview" style="font-size:12.5px;color:#1e40af;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 12px;margin-bottom:14px"></div>
@@ -3301,6 +3305,19 @@ async function handleSalesUpload(evt){
     if (!file) return;
     if (!XLSX_READY) { toast('Excel library loading', 'error'); evt.target.value=''; return; }
     if (!can('uploadSales')) { toast('Access denied', 'error'); return; }
+
+    const selectedStoreId = document.getElementById('salesUploadStore')?.value || '';
+    if (!selectedStoreId) {
+        toast('Please select a store first.', 'error');
+        evt.target.value = '';
+        return;
+    }
+    if (!isInScope(selectedStoreId, currentUser())) {
+        toast('Selected store is out of your scope.', 'error');
+        evt.target.value = '';
+        return;
+    }
+
     const batchDate = (document.getElementById('salesBatchDate')?.value) || todayISO();
     const monthTag = monthTagFromISO(batchDate);
     const reader = new FileReader();
@@ -3310,7 +3327,7 @@ async function handleSalesUpload(evt){
             const wb = XLSX.read(data, { type:'array', cellDates: true });
             const sheet = wb.Sheets[wb.SheetNames[0]];
             const json = XLSX.utils.sheet_to_json(sheet, { defval:'', raw: true });
-            await processSalesRows(json, file.name, { batchDate, monthTag });
+            await processSalesRows(json, file.name, { batchDate, monthTag, forcedStoreId: selectedStoreId });
         } catch(err) { toast('Parse failed: ' + err.message, 'error'); }
     };
     reader.readAsArrayBuffer(file);
@@ -3331,6 +3348,9 @@ async function processSalesRows(rows, filename, tag){
         return '';
     }
     const parsed = [], rejects = [];
+    const forcedStore = tag.forcedStoreId ? getStore(tag.forcedStoreId) : null;
+    if (!forcedStore) { toast('Selected store not found.', 'error'); return; }
+
     rows.forEach((row, i) => {
         const lineNo = i + 2;
         const storeCode = String(pick(row, H.storeCode) || '').trim();
@@ -3339,14 +3359,21 @@ async function processSalesRows(rows, filename, tag){
         if (!storeCode && !productId && qtyRaw === '') return;
         if (!storeCode) { rejects.push(`Row ${lineNo}: missing Store Code`); return; }
         if (!productId) { rejects.push(`Row ${lineNo}: missing Product ID`); return; }
-        const store = getStoreByCode(storeCode);
-        if (!store) { rejects.push(`Row ${lineNo}: Store "${storeCode}" not found`); return; }
-        if (!myStoreIds.has(store.id)) { rejects.push(`Row ${lineNo}: Store "${storeCode}" out of scope`); return; }
+
+        // Strict match — the Excel store code must equal the picked store
+        const rowStore = getStoreByCode(storeCode);
+        if (!rowStore) { rejects.push(`Row ${lineNo}: Store "${storeCode}" not found`); return; }
+        if (rowStore.id !== forcedStore.id) {
+            rejects.push(`Row ${lineNo}: Store "${storeCode}" does not match selected store "${forcedStore.code}"`);
+            return;
+        }
+        if (!myStoreIds.has(rowStore.id)) { rejects.push(`Row ${lineNo}: Store "${storeCode}" out of scope`); return; }
+
         const bom = getBOMByProductId(productId);
         if (!bom) { rejects.push(`Row ${lineNo}: No BOM for Product ID "${productId}"`); return; }
         const qty = Number(qtyRaw);
         if (isNaN(qty) || qty <= 0) { rejects.push(`Row ${lineNo}: invalid Qty "${qtyRaw}"`); return; }
-        parsed.push({ lineNo, storeId: store.id, storeCode, productId: bom.productId, bomId: bom.id, qty });
+        parsed.push({ lineNo, storeId: rowStore.id, storeCode, productId: bom.productId, bomId: bom.id, qty });
     });
     if (parsed.length === 0) {
         toast('No valid rows to import', 'error');
@@ -3613,10 +3640,6 @@ function openAuditWizard(){
     if (DB.items.length === 0) { toast('Add items first.', 'error'); return; }
 
     const today = todayISO();
-    const storeOptions = myStores.length === 1
-        ? `<option value="${myStores[0].id}" selected>${esc(storeLabel(myStores[0].id))}</option>`
-        : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
-
     window._auditDraft = { date: today, storeId: myStores[0].id, openingLines: null, salesUploadRef: null };
 
     openModal('New Surprise Audit — Step 1 of 2', `
@@ -3627,7 +3650,7 @@ function openAuditWizard(){
             <div class="form-row"><label>Audit Date</label>
                 <input type="date" id="wizDate" value="${today}"></div>
             <div class="form-row"><label>Store</label>
-                <select id="wizStore">${storeOptions}</select></div>
+                ${storePickerHTML('wizStore', myStores[0]?.id || '', 'Search store by code or name...')}</div>
         </div>
     `, `
         <button class="btn-light" onclick="closeModal()">Cancel</button>
@@ -4426,15 +4449,12 @@ function openOpeningSetup(){
     if (DB.items.length === 0) { toast('Add items first.', 'error'); return; }
     const months = getAvailableMonths();
     const defaultMonth = getCurrentMonthTag();
-    const storeOptions = myStores.length === 1
-        ? `<option value="${myStores[0].id}" selected>${esc(storeLabel(myStores[0].id))}</option>`
-        : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
     openModal('New Opening', `
         <div class="form-grid">
             <div class="form-row"><label>Month</label><select id="opSetupMonth">${months.map(m => `<option value="${m}" ${m===defaultMonth?'selected':''}>${m}</option>`).join('')}</select></div>
             <div class="form-row"><label>Date</label><input type="date" id="opSetupDate" value="${todayISO()}"></div>
         </div>
-        <div class="form-row"><label>Store</label><select id="opSetupStore">${storeOptions}</select></div>
+        <div class="form-row"><label>Store</label>${storePickerHTML('opSetupStore', myStores[0]?.id || '', 'Search store by code or name...')}</div>
     `, `<button class="btn-light" onclick="closeModal()">Cancel</button>
         <button class="btn-primary" onclick="startOpening()">Continue</button>`);
 }
