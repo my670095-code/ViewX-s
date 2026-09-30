@@ -1297,7 +1297,7 @@ const MENU_STRUCTURE = [
     { section:'Inventory' },
     { id:'opening', icon:'🔓', label:'Opening Stock' },
     { id:'sales', icon:'🛒', label:'Sales Upload' },
-    { id:'daily', icon:'◷', label:'Surprise Inventory Check' },
+   { id:'daily', icon:'◷', label:'Surprise Inv Check' },
     { section:'Master Data' },
     { id:'items', icon:'▤', label:'Item Master' },
     { id:'bom', icon:'⌘', label:'BOM / Recipes' },
@@ -1354,7 +1354,7 @@ function renderSidebar(){
 const TITLES = {
     dashboard:'Inventory Dashboard', opening:'Opening Stock (Month Start)',
     sales:'Sales Upload (BOM Explosion)',
-    daily:'Daily Inventory',
+   daily:'Surprise Inv Check',
     items:'Item Master', bom:'BOM / Recipe Management', stores:'Store Master',
     employees:'Employee Master', reports:'Reports & Analytics', users:'User Management',
     recycle:'Recycle Bin', backup:'Backup / Restore'
@@ -1525,7 +1525,7 @@ RENDERERS.dashboard = function(){
     <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))} &nbsp;·&nbsp; ${myStoreIds.size} store(s) visible</div>
     <div class="cards">
         <div class="card"><div class="card-label">Stores in Scope</div><div class="card-value">${visibleStores.length}</div></div>
-        <div class="card"><div class="card-label">Daily Journals</div><div class="card-value green">${visibleJournals.length}</div></div>
+        <div class="card"><div class="card-label">Surprise Checks</div><div class="card-value green">${visibleJournals.length}</div></div>
         <div class="card"><div class="card-label">Sales Uploads</div><div class="card-value blue">${DB.salesUploads.filter(s => myStoreIds.has(s.storeId)).length}</div></div>
         <div class="card"><div class="card-label">BOMs</div><div class="card-value">${DB.bom.length}</div></div>
     </div>
@@ -1538,7 +1538,7 @@ RENDERERS.dashboard = function(){
         </div></div></div>
     ` : `
     <div class="panel">
-        <div class="panel-header"><div class="panel-title">Recent Daily Journals</div></div>
+       <div class="panel-header"><div class="panel-title">Recent Surprise Checks</div></div>
         <div class="panel-body">
             ${visibleJournals.length === 0 ? '<div class="empty">No journals yet</div>' : `
             <table><thead><tr><th>Journal</th><th>Date</th><th>Store</th><th>Variance</th><th>By</th></tr></thead>
@@ -3170,7 +3170,7 @@ RENDERERS.sales = function(){
     <div class="info-block">
         <b>How it works:</b> Upload sales Excel with columns
         <code>Store Code</code> · <code>Product ID</code> · <code>Qty</code>.
-        Sales are exploded through BOMs and posted as <b>Daily</b> consumption.
+       Sales are exploded through BOMs and posted as <b>Surprise</b> consumption.
     </div>
     ${canUpload ? `
     <div class="panel">
@@ -3224,7 +3224,7 @@ function updateSalesTagPreview(){
     const dateStr = document.getElementById('salesBatchDate')?.value || todayISO();
     const preview = document.getElementById('salesTagPreview');
     if (!preview) return;
-    preview.innerHTML = `<b>Daily</b> — feeds the <b>Daily</b> journal for <b>${esc(dateStr)}</b>.`;
+    preview.innerHTML = `<b>Surprise</b> — feeds the <b>Surprise Inv Check</b> for <b>${esc(dateStr)}</b>.`;
 }
 async function handleSalesUpload(evt){
     const file = evt.target.files[0];
@@ -3372,7 +3372,7 @@ function viewSalesUpload(id){
             <div><div class="k">File</div><div class="v" style="font-size:12px">${esc(up.filename)}</div></div>
             <div><div class="k">Store</div><div class="v">${esc(storeLabel(up.storeId))}</div></div>
             <div><div class="k">Date</div><div class="v">${esc(up.date)}</div></div>
-            <div><div class="k">Tag</div><div class="v"><span class="badge badge-green">Daily</span></div></div>
+            <div><div class="k">Tag</div><div class="v"><span class="badge badge-green">Surprise</span></div></div>
             <div><div class="k">Valid Rows</div><div class="v green">${up.validRows}</div></div>
             <div><div class="k">Rejected</div><div class="v ${up.rejectedRows>0?'red':''}">${up.rejectedRows}</div></div>
             <div><div class="k">Units Sold</div><div class="v">${up.unitsSold || 0}</div></div>
@@ -3416,19 +3416,19 @@ function renderCountPage(){
     let journals = DB.journals.filter(j => j.type === 'daily' && myStoreIds.has(j.storeId));
     return `
     <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
-    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:11px 14px;margin-bottom:16px;font-size:12.5px;color:#1e40af">
-        <b>Rule:</b> Opening = previous daily journal's Physical (or manual Opening Stock if none). Consumption matched to <b>Daily + date</b>.
+        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:11px 14px;margin-bottom:16px;font-size:12.5px;color:#1e40af">
+        <b>Rule:</b> Opening = previous surprise check's Physical (or manual Opening Stock if none). Consumption matched to <b>Surprise + date</b>.
     </div>
     <div class="toolbar">
         <select id="dailyStoreFilter" onchange="filterJournals()">
             <option value="">All Stores (in scope)</option>
             ${myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('')}
         </select>
-        ${canCreate ? `<button class="btn-primary" onclick="openCountSetup()">+ New Daily Inventory</button>` : ''}
+        ${canCreate ? `<button class="btn-primary" onclick="openCountSetup()">+ New Surprise Inv Check</button>` : ''}
     </div>
     ${myStores.length === 0 && canCreate ? `<div class="warn-box">⚠ No stores in your scope yet.</div>` : ''}
     <div class="panel">
-        <div class="panel-header"><div class="panel-title">Daily Inventory Journals</div>
+       <div class="panel-header"><div class="panel-title">Surprise Inventory Checks</div>
         <span class="badge badge-blue">${journals.length} journals</span></div>
         <div class="panel-body" id="dailyListBody">${renderCountList(journals)}</div>
     </div>`;
@@ -3475,7 +3475,7 @@ function openCountSetup(){
     const u = currentUser();
     const myStores = getMyStoreObjects(u);
     if (myStores.length === 0) {
-        openModal('Cannot Create Inventory', `
+    openModal('Cannot Create Surprise Check', `
             <div class="dep-warning">
                 <div style="font-weight:bold;margin-bottom:8px">🚫 No stores in your scope</div>
                 <div style="font-size:13px;line-height:1.8">Ask an Administrator to assign you to a store.</div>
@@ -3488,7 +3488,7 @@ function openCountSetup(){
     const storeOptions = myStores.length === 1
         ? `<option value="${myStores[0].id}" selected>${esc(storeLabel(myStores[0].id))}</option>`
         : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
-    openModal(`New Daily Inventory`, `
+    openModal(`New Surprise Inv Check`, `
         <div class="form-grid">
             <div class="form-row"><label>Date</label><input type="date" id="setupDate" value="${today}"></div>
             <div class="form-row"><label>Store</label><select id="setupStore">${storeOptions}</select></div>
@@ -3511,9 +3511,9 @@ function startCount(){
     };
     const dup = findDuplicateJournal(header);
     if (dup) {
-        openModal('Duplicate Inventory', `
+        openModal('Duplicate Surprise Check', `
             <div class="dep-warning">
-                <div style="font-weight:bold;margin-bottom:8px">🚫 Inventory already exists</div>
+               <div style="font-weight:bold;margin-bottom:8px">🚫 Surprise check already exists</div>
                 <div style="font-size:13px"><b>Existing:</b> ${esc(dup.id)}</div>
             </div>
         `, `<button class="btn-light" onclick="closeModal()">Close</button>`);
@@ -3530,7 +3530,7 @@ function startCount(){
 }
 function showNoSalesGate(header){
     window._failedJournalGate = { header, prefill: { date: header.date } };
-    openModal('Cannot Create Journal — No Sales Data', `
+   openModal('Cannot Create Surprise Check — No Sales Data', `
         <div class="gate-icon">🚫</div>
         <div class="gate-title">No sales upload found</div>
         <div class="gate-details">
@@ -3554,11 +3554,11 @@ function openCountSheet(){
     if (!j) return;
     const modalBox = document.getElementById('modalBox');
     modalBox.className = 'modal modal-xl';
-    document.getElementById('modalTitle').innerHTML =
-        `Daily Count Sheet <span style="color:#2563eb">${esc(j.id)}</span> <span class="badge badge-orange" style="margin-left:8px">Entering</span>`;
+   document.getElementById('modalTitle').innerHTML =
+    `Surprise Check Sheet <span style="color:#2563eb">${esc(j.id)}</span> <span class="badge badge-orange" style="margin-left:8px">Entering</span>`;
     document.getElementById('modalBody').innerHTML = `
         <div class="journal-meta">
-            <div><div class="k">Type</div><div class="v">DAILY</div></div>
+            <div><div class="k">Type</div><div class="v">SURPRISE</div></div>
             <div><div class="k">Date</div><div class="v">${esc(j.date)}</div></div>
             <div><div class="k">Store</div><div class="v">${esc(storeLabel(j.storeId))}</div></div>
             <div><div class="k">Month</div><div class="v">${esc(j.month)}</div></div>
@@ -3646,11 +3646,11 @@ function viewCount(id){
     if (!j) return;
     const modalBox = document.getElementById('modalBox');
     modalBox.className = 'modal modal-xl';
-    document.getElementById('modalTitle').innerHTML =
-        `Journal <span style="color:#2563eb">${esc(j.id)}</span> ${badge(j.status)} <span style="font-size:12px;color:#6b7280;margin-left:8px">Daily · ${esc(j.date)}</span>`;
+  document.getElementById('modalTitle').innerHTML =
+    `Surprise Check <span style="color:#2563eb">${esc(j.id)}</span> ${badge(j.status)} <span style="font-size:12px;color:#6b7280;margin-left:8px">Surprise · ${esc(j.date)}</span>`;
     document.getElementById('modalBody').innerHTML = `
         <div class="journal-meta">
-            <div><div class="k">Type</div><div class="v">DAILY</div></div>
+            <div><div class="k">Type</div><div class="v">SURPRISE</div></div>
             <div><div class="k">Date</div><div class="v">${esc(j.date)}</div></div>
             <div><div class="k">Store</div><div class="v">${esc(storeLabel(j.storeId))}</div></div>
             <div><div class="k">Month</div><div class="v">${esc(j.month||'—')}</div></div>
@@ -3753,7 +3753,7 @@ function exportViewExcel(id){
     const store = getStore(j.storeId);
     const aoa = [
         ['Journal No', j.id],
-        ['Type', 'daily'],
+     ['Type', 'surprise'],
         ['Date', j.date],
         ['Store', store ? store.code + ' — ' + store.name : j.storeId],
         ['Month', j.month || ''],
@@ -3770,7 +3770,7 @@ function exportViewExcel(id){
     ws['!cols'] = [{wch:14},{wch:32},{wch:8},{wch:10},{wch:12},{wch:10},{wch:10},{wch:10}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Journal');
-    XLSX.writeFile(wb, `${j.id}_daily_${j.date}.xlsx`);
+  XLSX.writeFile(wb, `${j.id}_surprise_${j.date}.xlsx`);
     toast('Exported ' + j.id, 'success');
 }
 async function regenerateJournal(id){
@@ -3779,7 +3779,7 @@ async function regenerateJournal(id){
     const j = DB.journals.find(x => x.id === id);
     if (!j) { toast('Journal not found', 'error'); return; }
     if (j.status !== 'Submitted') { toast('Only submitted journals can be recalculated', 'error'); return; }
-    if (!confirm(`Recalculate "${j.id}"?\n\nThis will re-read consumption for ${j.date} and update Expected / Variance.`)) return;
+  if (!confirm(`Recalculate "${j.id}"?\n\nThis will re-read consumption for ${j.date} and update Expected / Variance on this surprise check.`)) return;
     const rebuilt = buildCountLines({
         storeId: j.storeId,
         type: 'daily',
@@ -4181,7 +4181,7 @@ RENDERERS.reports = function(){
                 <tr><td>Sales Uploads Report</td><td><button class="btn-primary btn-sm" onclick="exportSalesCSV()">CSV</button></td></tr>
                 <tr><td>Exploded Consumption Report</td><td><button class="btn-primary btn-sm" onclick="exportExplodedCSV()">CSV</button></td></tr>
                 <tr><td>Inventory Journals Report</td><td><button class="btn-primary btn-sm" onclick="exportJournalsCSV()">CSV</button></td></tr>
-                <tr><td>Daily Variance Report</td><td><button class="btn-primary btn-sm" onclick="exportDailyVarianceCSV()">CSV</button></td></tr>
+               <tr><td>Surprise Check Variance Report</td><td><button class="btn-primary btn-sm" onclick="exportDailyVarianceCSV()">CSV</button></td></tr>
                 <tr><td>Full Backup (JSON)</td><td><button class="btn-primary btn-sm" onclick="exportFullBackup()">Download</button></td></tr>
             </tbody></table>
         </div>
@@ -4250,7 +4250,7 @@ function exportDailyVarianceCSV(){
         const valueImpact = (l.variance||0) * (it ? it.cost : 0);
         out.push([j.id, j.date, storeLabel(j.storeId), it?it.code:'', it?it.name:'', l.uom, l.opening, l.consumption, l.expected, l.physical, l.variance, valueImpact.toFixed(2), j.byName]);
     }));
-    downloadCSV(out, 'daily_variance.csv');
+    downloadCSV(out, 'surprise_variance.csv');
 }
 function downloadCSV(rows, filename){
     const csv = rows.map(r => r.map(c => `"${String(c==null?'':c).replace(/"/g,'""')}"`).join(',')).join('\n');
