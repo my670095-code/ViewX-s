@@ -3446,30 +3446,34 @@ async function processSalesRows(rows, filename, tag){
     const parsed = [], rejects = [];
     const forcedStore = tag.forcedStoreId ? getStore(tag.forcedStoreId) : null;
     if (!forcedStore) { toast('Selected store not found.', 'error'); return; }
+    if (!myStoreIds.has(forcedStore.id)) { toast('Selected store is out of your scope.', 'error'); return; }
 
     rows.forEach((row, i) => {
         const lineNo = i + 2;
-        const storeCode = String(pick(row, H.storeCode) || '').trim();
+        const storeCode = String(pick(row, H.storeCode) || '').trim();   // informational only
         const productId = String(pick(row, H.productId) || '').trim();
         const qtyRaw    = pick(row, H.qty);
-        if (!storeCode && !productId && qtyRaw === '') return;
-        if (!storeCode) { rejects.push(`Row ${lineNo}: missing Store Code`); return; }
+        if (!productId && qtyRaw === '') return;
         if (!productId) { rejects.push(`Row ${lineNo}: missing Product ID`); return; }
 
-        // Strict match — the Excel store code must equal the picked store
-        const rowStore = getStoreByCode(storeCode);
-        if (!rowStore) { rejects.push(`Row ${lineNo}: Store "${storeCode}" not found`); return; }
-        if (rowStore.id !== forcedStore.id) {
-            rejects.push(`Row ${lineNo}: Store "${storeCode}" does not match selected store "${forcedStore.code}"`);
-            return;
-        }
-        if (!myStoreIds.has(rowStore.id)) { rejects.push(`Row ${lineNo}: Store "${storeCode}" out of scope`); return; }
+        // ★ FORCE: every row is credited to the selected store,
+        //   regardless of what the Excel Store Code says.
+        const rowStore = forcedStore;
 
         const bom = getBOMByProductId(productId);
         if (!bom) { rejects.push(`Row ${lineNo}: No BOM for Product ID "${productId}"`); return; }
         const qty = Number(qtyRaw);
         if (isNaN(qty) || qty <= 0) { rejects.push(`Row ${lineNo}: invalid Qty "${qtyRaw}"`); return; }
-        parsed.push({ lineNo, storeId: rowStore.id, storeCode, productId: bom.productId, bomId: bom.id, qty });
+
+        // Optional: collect a warning if the Excel mentions a different store
+        if (storeCode && norm(storeCode) !== norm(forcedStore.code)) {
+            // Track for a summary warning (do not reject)
+            const key = storeCode.toUpperCase();
+            if (!tag._storeMismatches) tag._storeMismatches = {};
+            tag._storeMismatches[key] = (tag._storeMismatches[key] || 0) + 1;
+        }
+
+        parsed.push({ lineNo, storeId: rowStore.id, storeCode: rowStore.code, productId: bom.productId, bomId: bom.id, qty });
     });
     if (parsed.length === 0) {
         toast('No valid rows to import', 'error');
