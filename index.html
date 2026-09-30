@@ -3497,11 +3497,15 @@ function findDuplicateJournal(journal){
         j.date === journal.date
     );
 }
-function openCountSetup(){
+/* ══════════════════════════════════════════════════════════════
+   AUDIT WIZARD — Step 1: date + store
+   ══════════════════════════════════════════════════════════════ */
+function openAuditWizard(){
+    if (!can('createSurpriseAudit')) { toast('Access denied.', 'error'); return; }
     const u = currentUser();
     const myStores = getMyStoreObjects(u);
     if (myStores.length === 0) {
-    openModal('Cannot Create Surprise Check', `
+        openModal('Cannot Create Surprise Audit', `
             <div class="dep-warning">
                 <div style="font-weight:bold;margin-bottom:8px">🚫 No stores in your scope</div>
                 <div style="font-size:13px;line-height:1.8">Ask an Administrator to assign you to a store.</div>
@@ -3510,48 +3514,196 @@ function openCountSetup(){
         return;
     }
     if (DB.items.length === 0) { toast('Add items first.', 'error'); return; }
+
     const today = todayISO();
     const storeOptions = myStores.length === 1
         ? `<option value="${myStores[0].id}" selected>${esc(storeLabel(myStores[0].id))}</option>`
         : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
-    openModal(`New Surprise Inv Check`, `
-        <div class="form-grid">
-            <div class="form-row"><label>Date</label><input type="date" id="setupDate" value="${today}"></div>
-            <div class="form-row"><label>Store</label><select id="setupStore">${storeOptions}</select></div>
+
+    window._auditDraft = { date: today, storeId: myStores[0].id, openingLines: null, salesUploadRef: null };
+
+    openModal('New Surprise Audit — Step 1 of 2', `
+        <div class="info-block">
+            <b>Step 1:</b> Choose the audit date and store. In the next step you'll upload the opening stock file and verify the sales data for that day.
         </div>
-    `, `<button class="btn-light" onclick="closeModal()">Cancel</button>
-        <button class="btn-primary" onclick="startCount()">Continue</button>`);
+        <div class="form-grid">
+            <div class="form-row"><label>Audit Date</label>
+                <input type="date" id="wizDate" value="${today}"></div>
+            <div class="form-row"><label>Store</label>
+                <select id="wizStore">${storeOptions}</select></div>
+        </div>
+    `, `
+        <button class="btn-light" onclick="closeModal()">Cancel</button>
+        <button class="btn-primary" onclick="auditWizardStep2()">Continue →</button>
+    `);
 }
-function startCount(){
+
+function auditWizardStep2(){
+    const date = document.getElementById('wizDate').value;
+    const storeId = document.getElementById('wizStore').value;
     const u = currentUser();
-    const date = document.getElementById('setupDate').value;
-    const storeId = document.getElementById('setupStore').value;
     if (!date || !storeId) { toast('Date and Store required', 'error'); return; }
     if (!isInScope(storeId, u)) { toast('Access denied.', 'error'); return; }
-    const monthTag = monthTagFromISO(date);
-    const journalNo = nextJournalNo('INV', date);
-    const header = {
-        id: journalNo, type: 'daily', date, storeId, month: monthTag,
-        byId: u.id, byName: u.name, status:'Draft',
-        createdAt: nowISO(), lines: []
-    };
-    const dup = findDuplicateJournal(header);
+
+    // Duplicate check
+    const dup = DB.journals.find(j =>
+        j.storeId === storeId &&
+        j.date === date &&
+        j.status === 'Submitted'
+    );
     if (dup) {
-        openModal('Duplicate Surprise Check', `
+        openModal('Duplicate Surprise Audit', `
             <div class="dep-warning">
-               <div style="font-weight:bold;margin-bottom:8px">🚫 Surprise check already exists</div>
+                <div style="font-weight:bold;margin-bottom:8px">🚫 An audit already exists</div>
                 <div style="font-size:13px"><b>Existing:</b> ${esc(dup.id)}</div>
             </div>
         `, `<button class="btn-light" onclick="closeModal()">Close</button>`);
         return;
     }
-    const sales = findSalesUploadForJournal(header);
-    if (!sales) { showNoSalesGate(header); return; }
+
+    window._auditDraft.date = date;
+    window._auditDraft.storeId = storeId;
+
+    // Check sales upload exists for this store + date
+    const sales = DB.salesUploads.find(s => s.storeId === storeId && s.date === date);
+
+    openModal('New Surprise Audit — Step 2 of 2', `
+        <div class="info-block">
+            <b>Step 2:</b> Upload the <b>Opening Stock file</b> for this audit.
+            ${sales ? '✅ Sales data found for this date.' : '⚠ No sales upload for this date yet — you can still continue, or upload sales first.'}
+        </div>
+
+        <div class="form-row" style="margin-top:18px">
+            <label>Opening Stock File (SKU + Counted)</label>
+            <div class="upload-drop" onclick="document.getElementById('auditOpeningFile').click()" style="padding:24px 20px">
+                <div class="upload-icon">📊</div>
+                <div class="upload-text">Click to upload Opening Stock</div>
+                <div class="upload-hint">Excel (.xlsx, .xls, .csv) · Headers must include <code>SKU</code> and <code>Counted</code></div>
+            </div>
+            <input type="file" id="auditOpeningFile" class="upload-file" accept=".xlsx,.xls,.csv" onchange="handleAuditOpeningFile(event)">
+        </div>
+
+        <div id="auditOpeningPreview" style="margin-top:12px"></div>
+    `, `
+        <button class="btn-light" onclick="closeModal()">Cancel</button>
+        <button class="btn-primary" id="auditStartBtn" onclick="auditWizardStartCount()" disabled>Start Count Sheet →</button>
+    `);
+}
+
+let _auditOpeningParsed = null;
+async function handleAuditOpeningFile(evt){
+    const file = evt.target.files[0];
+    if (!file) return;
+    if (!XLSX_READY) { toast('Excel library still loading.', 'error'); evt.target.value=''; return; }
+    const reader = new FileReader();
+    reader.onload = function(e){
+        try {
+            const data = new Uint8Array(e.target.result);
+            const wb = XLSX.read(data, { type:'array', cellDates: true });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
+            parseAuditOpening(aoa, file.name);
+        } catch(err) { toast('Parse failed: ' + err.message, 'error'); }
+    };
+    reader.readAsArrayBuffer(file);
+    evt.target.value = '';
+}
+
+function parseAuditOpening(aoa, filename){
+    if (!aoa || aoa.length === 0) { toast('File is empty', 'error'); return; }
+    const normCell = s => String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
+    let headerIdx = -1, skuCol = -1, qtyCol = -1, uomCol = -1;
+    for (let r = 0; r < aoa.length; r++) {
+        const row = aoa[r] || [];
+        const lowered = row.map(normCell);
+        const sIdx = lowered.findIndex(c => c === 'sku');
+        const qIdx = lowered.findIndex(c => c === 'counted');
+        if (sIdx >= 0 && qIdx >= 0) {
+            headerIdx = r; skuCol = sIdx; qtyCol = qIdx;
+            uomCol = lowered.findIndex(c => c === 'storageuom' || c === 'uom' || c === 'unit');
+            break;
+        }
+    }
+    if (headerIdx < 0) { toast('No header row with "SKU" and "Counted" found.', 'error'); return; }
+
+    const itemByCode = new Map();
+    DB.items.forEach(i => itemByCode.set(String(i.code).trim().toLowerCase(), i));
+
+    const valid = [], rejects = [];
+    const seen = new Set();
+    for (let r = headerIdx + 1; r < aoa.length; r++) {
+        const row = aoa[r] || [];
+        const skuRaw = String(row[skuCol] ?? '').trim();
+        const qtyRaw = row[qtyCol];
+        if (!skuRaw && (qtyRaw === '' || qtyRaw === undefined || qtyRaw === null)) continue;
+        const lineNo = r + 1;
+        if (!skuRaw) { rejects.push({ line: lineNo, reason: 'Missing SKU' }); continue; }
+        const sku = skuRaw.replace(/[^a-zA-Z0-9._-]/g, '');
+        if (seen.has(sku)) { rejects.push({ line: lineNo, reason: `Duplicate SKU "${sku}"` }); continue; }
+        seen.add(sku);
+        const item = itemByCode.get(sku.toLowerCase());
+        if (!item) { rejects.push({ line: lineNo, reason: `SKU "${sku}" not in Item Master` }); continue; }
+        const qty = Number(qtyRaw);
+        if (isNaN(qty)) { rejects.push({ line: lineNo, reason: `Invalid Counted "${qtyRaw}"` }); continue; }
+        valid.push({
+            itemId: item.id, itemCode: item.code, itemName: item.name, qty,
+            uom: (uomCol >= 0 && String(row[uomCol]||'').trim()) || item.uom || 'PCS'
+        });
+    }
+    _auditOpeningParsed = { valid, rejects, filename };
+
+    const sample = valid.slice(0, 10);
+    document.getElementById('auditOpeningPreview').innerHTML = `
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:10px">
+            <b>File:</b> ${esc(filename)} · <span class="green"><b>${valid.length}</b> valid</span>
+            ${rejects.length ? ` · <span class="red">${rejects.length} rejected</span>` : ''}
+        </div>
+        ${sample.length > 0 ? `<div style="max-height:200px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+            <table style="font-size:12px"><thead><tr><th>SKU</th><th>Item</th><th style="text-align:right">Qty</th></tr></thead>
+            <tbody>${sample.map(r => `<tr><td>${esc(r.itemCode)}</td><td>${esc(r.itemName)}</td><td style="text-align:right">${fmtNum(r.qty)}</td></tr>`).join('')}</tbody></table>
+        </div>` : ''}
+    `;
+    const btn = document.getElementById('auditStartBtn');
+    if (btn) btn.disabled = valid.length === 0;
+}
+
+function auditWizardStartCount(){
+    if (!_auditOpeningParsed || _auditOpeningParsed.valid.length === 0) {
+        toast('Upload an Opening Stock file first.', 'error');
+        return;
+    }
+
+    const d = window._auditDraft;
+    const u = currentUser();
+    const monthTag = monthTagFromISO(d.date);
+    const journalNo = nextJournalNo('INV', d.date);
+
+    const header = {
+        id: journalNo,
+        type: 'daily',
+        date: d.date,
+        storeId: d.storeId,
+        month: monthTag,
+        byId: u.id,
+        byName: u.name,
+        status: 'Draft',
+        auditStage: 'draft',
+        openingLines: _auditOpeningParsed.valid.map(r => ({
+            itemId: r.itemId, qty: r.qty, uom: r.uom
+        })),
+        createdAt: nowISO(),
+        lines: []
+    };
+
     const result = buildCountLines(header);
-    if (result.lines.length === 0) { toast('No items flagged for Daily', 'error'); return; }
+    if (result.lines.length === 0) {
+        toast('No items to count (no opening + no consumption).', 'error');
+        return;
+    }
+
     header.lines = result.lines;
-    header.baselineInfo = result.openingSource;
     window._workingCount = header;
+    _auditOpeningParsed = null;
     openCountSheet();
 }
 function showNoSalesGate(header){
@@ -3611,12 +3763,37 @@ function openCountSheet(){
 }
 function countRowHTML(line, idx){
     const it = getItem(line.itemId);
+    const val = (line.physical === null || line.physical === undefined) ? '' : line.physical;
     return `<tr data-idx="${idx}" data-code="${esc(it?it.code:'')}" data-name="${esc(it?it.name.toLowerCase():'')}">
         <td><b>${esc(it?it.code:'?')}</b></td>
         <td>${esc(it?it.name:'Unknown')}</td>
         <td>${esc(line.uom)}</td>
-        <td><input type="number" step="0.01" value="${line.physical}" oninput="updateCountLine(${idx}, this.value)" style="width:100%"></td>
+        <td><input type="number" step="0.01" value="${val}" placeholder="—" oninput="updateCountLine(${idx}, this.value)" style="width:100%"></td>
     </tr>`;
+}
+
+function updateCountLine(idx, value){
+    const j = window._workingCount;
+    if (!j) return;
+    const line = j.lines[idx];
+    if (value === '' || value === null || value === undefined) {
+        line.physical = null;
+        line.variance = 0;
+    } else {
+        line.physical = Number(value);
+        line.variance = line.physical - line.expected;
+    }
+    updateCountProgress();
+}
+
+function updateCountProgress(){
+    const j = window._workingCount;
+    if (!j) return;
+    const entered = j.lines.filter(l => l.physical !== null && l.physical !== undefined && l.physical !== 0).length;
+    const a = document.getElementById('cEntered');
+    const b = document.getElementById('cEnteredFoot');
+    if (a) a.textContent = entered;
+    if (b) b.textContent = entered;
 }
 function updateCountLine(idx, value){
     const j = window._workingCount;
@@ -3646,10 +3823,30 @@ function cancelCount(){ if (!confirm('Discard?')) return; window._workingCount =
 async function submitCount(){
     const j = window._workingCount;
     if (!j) return;
-    if (!j.lines.some(l => l.physical !== 0)) { toast('Enter at least one qty', 'error'); return; }
+
+    // Only keep lines with explicit non-zero physical count
+    const countedLines = j.lines.filter(l =>
+        l.physical !== null &&
+        l.physical !== undefined &&
+        l.physical !== 0 &&
+        !isNaN(l.physical)
+    );
+
+    if (countedLines.length === 0) {
+        toast('Enter at least one physical count (non-zero).', 'error');
+        return;
+    }
+
+    // Recompute variance for kept lines only
+    countedLines.forEach(l => {
+        l.variance = l.physical - l.expected;
+    });
+
+    j.lines = countedLines;
     j.status = 'Submitted';
+    j.auditStage = 'awaiting_store';
     j.submittedAt = nowISO();
-    delete j.baselineInfo;
+
     try {
         if (CLOUD_MODE === 'supabase') {
             await DataLayer.submitJournal(j);
@@ -3664,7 +3861,7 @@ async function submitCount(){
     const jId = j.id;
     window._workingCount = null;
     closeModal();
-    toast(`Journal ${jId} submitted`, 'success');
+    toast(`Audit ${jId} submitted — awaiting store response`, 'success');
     showPage('daily');
 }
 function viewCount(id){
@@ -3672,15 +3869,36 @@ function viewCount(id){
     if (!j) return;
     const modalBox = document.getElementById('modalBox');
     modalBox.className = 'modal modal-xl';
-  document.getElementById('modalTitle').innerHTML =
-    `Surprise Check <span style="color:#2563eb">${esc(j.id)}</span> ${badge(j.status)} <span style="font-size:12px;color:#6b7280;margin-left:8px">Surprise · ${esc(j.date)}</span>`;
+
+    const stage = j.auditStage || j.audit_stage || 'submitted';
+    const stageBadge = stage === 'awaiting_store'
+        ? '<span class="badge badge-orange" style="margin-left:8px">Awaiting Store</span>'
+        : stage === 'acknowledged'
+            ? '<span class="badge badge-green" style="margin-left:8px">Acknowledged</span>'
+            : '';
+
+    document.getElementById('modalTitle').innerHTML =
+        `Surprise Audit <span style="color:#2563eb">${esc(j.id)}</span> ${stageBadge} <span style="font-size:12px;color:#6b7280;margin-left:8px">${esc(j.date)}</span>`;
+
+    const actionPlanBlock = (stage === 'acknowledged' && j.actionPlan) ? `
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 18px;margin-bottom:18px;font-size:13px">
+            <div style="font-weight:bold;color:#15803d;margin-bottom:6px">✅ Action Plan (submitted by ${esc(j.actionPlanBy || 'store')})</div>
+            <div style="white-space:pre-wrap;color:#1f2937">${esc(j.actionPlan)}</div>
+            <div style="font-size:11px;color:#6b7280;margin-top:8px">
+                Acknowledged by ${esc(j.acknowledgedByName || '—')} · ${j.acknowledgedAt ? new Date(j.acknowledgedAt).toLocaleString() : '—'}
+            </div>
+        </div>` : '';
+
     document.getElementById('modalBody').innerHTML = `
         <div class="journal-meta">
-            <div><div class="k">Type</div><div class="v">SURPRISE</div></div>
+            <div><div class="k">Type</div><div class="v">SURPRISE AUDIT</div></div>
             <div><div class="k">Date</div><div class="v">${esc(j.date)}</div></div>
             <div><div class="k">Store</div><div class="v">${esc(storeLabel(j.storeId))}</div></div>
             <div><div class="k">Month</div><div class="v">${esc(j.month||'—')}</div></div>
         </div>
+
+        ${actionPlanBlock}
+
         <div class="journal-toolbar">
             <div class="journal-progress">Showing <b id="vCount">${j.lines.length}</b> / ${j.lines.length} items</div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -3688,10 +3906,10 @@ function viewCount(id){
                 <button class="btn-light btn-sm" onclick="sortViewRows('code')">Sort: Code</button>
                 <button class="btn-light btn-sm" onclick="sortViewRows('name')">Sort: Name</button>
                 <button class="btn-light btn-sm" onclick="sortViewRows('variance')">Sort: Variance</button>
-                ${j.status === 'Submitted' ? `<button class="btn-warn btn-sm" onclick="regenerateJournal('${j.id}')">🔄 Recalculate</button>` : ''}
                 <button class="btn-primary btn-sm" onclick="exportViewExcel('${j.id}')">📥 Export Excel</button>
             </div>
         </div>
+
         <div class="journal-table-wrap"><table id="viewCountTable"><thead><tr>
             <th>Code</th>
             <th>Item</th>
@@ -3701,18 +3919,202 @@ function viewCount(id){
             <th style="text-align:right">Expected</th>
             <th style="text-align:right">Physical</th>
             <th style="text-align:right">Variance</th>
+            ${stage === 'acknowledged' ? '<th>Store Remark</th>' : ''}
         </tr></thead>
         <tbody id="viewCountBody"></tbody></table></div>
     `;
+
     window._viewJournal = j;
     window._viewSort = { key: 'code', dir: 1 };
     renderViewRows();
+
     document.getElementById('modalFooter').innerHTML = `<button class="btn-light" onclick="closeModal()">Close</button>`;
     document.getElementById('modalOverlay').classList.add('show');
+}
+    /* ══════════════════════════════════════════════════════════════
+   STORE ACKNOWLEDGMENT FLOW
+   ══════════════════════════════════════════════════════════════ */
+
+function openAcknowledgeSheet(id){
+    if (!can('acknowledgeAudit')) { toast('Access denied.', 'error'); return; }
+    const j = DB.journals.find(x => x.id === id);
+    if (!j) { toast('Audit not found.', 'error'); return; }
+    const stage = j.auditStage || j.audit_stage;
+    if (stage !== 'awaiting_store') { toast('This audit is not awaiting store response.', 'error'); return; }
+
+    const u = currentUser();
+    if (u.role === 'store' && u.storeId !== j.storeId) {
+        toast('This audit belongs to another store.', 'error');
+        return;
+    }
+
+    window._ackJournal = j;
+
+    const modalBox = document.getElementById('modalBox');
+    modalBox.className = 'modal modal-xl';
+
+    const varianceLines = j.lines.filter(l => (l.variance || 0) !== 0);
+
+    document.getElementById('modalTitle').innerHTML =
+        `Acknowledge Audit <span style="color:#2563eb">${esc(j.id)}</span> <span class="badge badge-orange" style="margin-left:8px">Awaiting Store</span>`;
+
+    if (varianceLines.length === 0) {
+        document.getElementById('modalBody').innerHTML = `
+            <div class="info-block"><b>No variance items.</b> You can still submit an acknowledgment with a general action plan.</div>
+        `;
+    } else {
+        document.getElementById('modalBody').innerHTML = `
+            <div class="info-block">
+                <b>${varianceLines.length}</b> item(s) with variance. Add a remark for each and submit with an action plan.
+            </div>
+            <div class="journal-table-wrap"><table><thead><tr>
+                <th>Code</th><th>Item</th><th>UOM</th>
+                <th style="text-align:right">Expected</th>
+                <th style="text-align:right">Physical</th>
+                <th style="text-align:right">Variance</th>
+                <th style="width:280px">Store Remark</th>
+            </tr></thead>
+            <tbody id="ackBody">
+                ${varianceLines.map((l, idx) => {
+                    const it = getItem(l.itemId);
+                    const v = l.variance || 0;
+                    const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
+                    return `<tr data-item-id="${l.itemId}">
+                        <td><b>${esc(it?.code || '?')}</b></td>
+                        <td>${esc(it?.name || 'Unknown')}</td>
+                        <td>${esc(l.uom)}</td>
+                        <td style="text-align:right">${fmtNum(l.expected)}</td>
+                        <td style="text-align:right">${fmtNum(l.physical)}</td>
+                        <td style="text-align:right" class="${vClass}"><b>${v>0?'+':''}${fmtNum(v)}</b></td>
+                        <td><input type="text" placeholder="Explain variance..." value="${esc(l.storeRemark || l.store_remark || '')}" oninput="updateAckRemark('${l.itemId}', this.value)" style="width:100%"></td>
+                    </tr>`;
+                }).join('')}
+            </tbody></table></div>
+        `;
+    }
+
+    document.getElementById('modalFooter').innerHTML = `
+        <button class="btn-light" onclick="closeModal()">Cancel</button>
+        <button class="btn-success" onclick="openActionPlanModal()">Submit with Action Plan →</button>`;
+
+    document.getElementById('modalOverlay').classList.add('show');
+}
+
+function updateAckRemark(itemId, value){
+    const j = window._ackJournal;
+    if (!j) return;
+    const line = j.lines.find(l => l.itemId === itemId);
+    if (!line) return;
+    line.storeRemark = value;
+    line.store_remark = value;
+    line.storeRemarkBy = currentUser()?.name;
+    line.store_remark_by = currentUser()?.name;
+    line.storeRemarkAt = nowISO();
+    line.store_remark_at = nowISO();
+}
+
+function openActionPlanModal(){
+    const j = window._ackJournal;
+    if (!j) return;
+
+    // Check remarks present for all variance lines
+    const varianceLines = j.lines.filter(l => (l.variance || 0) !== 0);
+    const missing = varianceLines.filter(l => !(l.storeRemark || l.store_remark || '').trim());
+    if (missing.length > 0) {
+        toast(`${missing.length} variance item(s) missing remarks`, 'error');
+        return;
+    }
+
+    // Nested modal — keep the ack sheet open behind, open smaller modal on top
+    const overlay = document.getElementById('modalOverlay');
+    overlay.insertAdjacentHTML('beforeend', `
+        <div class="modal" id="actionPlanModal" style="max-width:600px;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250">
+            <div class="modal-header">
+                <h3>Action Plan</h3>
+                <button class="modal-close" onclick="document.getElementById('actionPlanModal').remove()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="info-block">
+                    <b>Remarks captured for all ${varianceLines.length} variance item(s).</b>
+                    Now write the overall action plan that will be shared with the Area Manager.
+                </div>
+                <div class="form-row">
+                    <label>Action Plan</label>
+                    <textarea id="actionPlanText" style="min-height:140px" placeholder="e.g. Retraining scheduled for 02/10. Weekly milk station audit. New SOP shared with shift leaders."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-light" onclick="document.getElementById('actionPlanModal').remove()">Cancel</button>
+                <button class="btn-success" onclick="submitAcknowledgment()">Submit</button>
+            </div>
+        </div>
+    `);
+    setTimeout(() => document.getElementById('actionPlanText')?.focus(), 50);
+}
+
+async function submitAcknowledgment(){
+    const j = window._ackJournal;
+    if (!j) return;
+    const plan = (document.getElementById('actionPlanText')?.value || '').trim();
+    if (plan.length < 5) { toast('Action plan is too short.', 'error'); return; }
+
+    const u = currentUser();
+    const now = nowISO();
+
+    j.auditStage = 'acknowledged';
+    j.audit_stage = 'acknowledged';
+    j.actionPlan = plan;
+    j.actionPlanBy = u.name;
+    j.actionPlanAt = now;
+    j.acknowledgedById = u.id;
+    j.acknowledgedByName = u.name;
+    j.acknowledgedAt = now;
+
+    try {
+        if (CLOUD_MODE === 'supabase') {
+            // Update journal header
+            const { error: eH } = await SB.from('journals').update({
+                audit_stage: 'acknowledged',
+                action_plan: plan,
+                action_plan_by: u.name,
+                action_plan_at: now,
+                acknowledged_by_id: u.id,
+                acknowledged_by_name: u.name,
+                acknowledged_at: now
+            }).eq('id', j.id);
+            if (eH) throw eH;
+
+            // Update lines with store remarks
+            for (const line of j.lines) {
+                const remark = line.storeRemark || line.store_remark || '';
+                if (!remark) continue;
+                const { error: eL } = await SB.from('journal_lines').update({
+                    store_remark: remark,
+                    store_remark_by: line.storeRemarkBy || line.store_remark_by || u.name,
+                    store_remark_at: line.storeRemarkAt || line.store_remark_at || now
+                }).eq('journal_id', j.id).eq('item_id', line.itemId);
+                if (eL) console.warn('Line remark update failed:', eL.message);
+            }
+        }
+    } catch(err) {
+        toast('Acknowledge failed: ' + (err.message || err), 'error');
+        return;
+    }
+
+    // Close action plan + ack sheet
+    document.getElementById('actionPlanModal')?.remove();
+    closeModal();
+    window._ackJournal = null;
+
+    toast('Audit acknowledged successfully.', 'success');
+    showPage('daily');
 }
 function renderViewRows(){
     const j = window._viewJournal;
     if (!j) return;
+    const stage = j.auditStage || j.audit_stage || 'submitted';
+    const showRemark = stage === 'acknowledged';
+
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
     let rows = j.lines.map(l => {
         const it = getItem(l.itemId);
@@ -3724,7 +4126,8 @@ function renderViewRows(){
             consumption: l.consumption,
             expected: l.expected,
             physical: l.physical,
-            variance: l.variance||0
+            variance: l.variance||0,
+            store_remark: l.storeRemark || l.store_remark || ''
         };
     });
     if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
@@ -3733,6 +4136,9 @@ function renderViewRows(){
         if (s.key === 'variance') return (a.variance - b.variance) * s.dir;
         return String(a[s.key]).localeCompare(String(b[s.key])) * s.dir;
     });
+
+    const colspan = showRemark ? 9 : 8;
+
     document.getElementById('viewCountBody').innerHTML = rows.map(r => {
         const v = r.variance;
         const vClass = v>0?'red':v<0?'green':'';
@@ -3745,8 +4151,10 @@ function renderViewRows(){
             <td style="text-align:right"><b>${fmtNum(r.expected)}</b></td>
             <td style="text-align:right"><b>${fmtNum(r.physical)}</b></td>
             <td style="text-align:right" class="${vClass}">${v>0?'+':''}${fmtNum(v)}</td>
+            ${showRemark ? `<td style="font-size:12px;color:#4b5563">${esc(r.store_remark || '—')}</td>` : ''}
         </tr>`;
-    }).join('') || '<tr><td colspan="8" style="text-align:center;padding:24px;color:#9ca3af">No items match</td></tr>';
+    }).join('') || `<tr><td colspan="${colspan}" style="text-align:center;padding:24px;color:#9ca3af">No items match</td></tr>`;
+
     const cnt = document.getElementById('vCount');
     if (cnt) cnt.textContent = rows.length;
 }
