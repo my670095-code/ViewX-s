@@ -3724,6 +3724,13 @@ function auditWizardStartCount(){
         createdAt: nowISO(),
         lines: []
     };
+        // ── Sales gate (Decision 6A) ──
+    const salesUpload = DB.salesUploads.find(s => s.storeId === d.storeId && s.date === d.date);
+    if (!salesUpload) {
+        _auditOpeningParsed = null;
+        showNoSalesGate(header);
+        return;
+    }
 
     const result = buildCountLines(header);
     if (result.lines.length === 0) {
@@ -4131,20 +4138,15 @@ function renderViewRows(){
     const showRemark = stage === 'acknowledged';
 
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
-    let rows = j.lines.map(l => {
-        const it = getItem(l.itemId);
-        return {
-            code: it ? it.code : '',
-            name: it ? it.name : 'Unknown',
-            uom: l.uom,
-            opening: l.opening,
-            consumption: l.consumption,
-            expected: l.expected,
-            physical: l.physical,
-            variance: l.variance||0,
-            store_remark: l.storeRemark || l.store_remark || ''
-        };
-    });
+ let rows = j.lines.map(l => {
+    const it = getItem(l.itemId);
+    return {
+        code: it?it.code:'', name: it?it.name:'Unknown', uom: l.uom,
+        opening: l.opening, consumption: l.consumption,
+        expected: l.expected, physical: l.physical, variance: l.variance||0,
+        store_remark: l.storeRemark || l.store_remark || ''   // ← ADD
+    };
+});
     if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
     const s = window._viewSort;
     rows.sort((a,b) => {
@@ -4237,11 +4239,14 @@ async function regenerateJournal(id){
         type: 'daily',
         date: j.date,
         month: j.month,
+        openingLines: j.openingLines || [],
         createdAt: j.createdAt
     });
     const oldPhysical = {};
     j.lines.forEach(l => { oldPhysical[l.itemId] = Number(l.physical) || 0; });
-    const newLines = rebuilt.lines.map(l => {
+        const newLines = rebuilt.lines
+        .map(l => { /* existing map */ })
+        .filter(l => l.physical !== 0 && l.physical !== null && !isNaN(l.physical));
         const phys = oldPhysical[l.itemId] !== undefined ? oldPhysical[l.itemId] : 0;
         return {
             itemId: l.itemId,
