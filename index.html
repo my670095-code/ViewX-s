@@ -253,6 +253,13 @@ input:focus, select:focus { outline:none; border-color:#1a7a4c; box-shadow:0 0 0
 .gate-details { background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:12px 14px; font-size:13px; line-height:1.9; margin-bottom:14px; }
 .gate-details .k { color:#6b7280; display:inline-block; min-width:100px; }
 .gate-hint { font-size:12.5px; color:#6b7280; margin-bottom:0; }
+    .spinner {
+    width: 36px; height: 36px; border: 3px solid #e5e7eb;
+    border-top-color: #1a7a4c; border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin: 0 auto;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-block { text-align: center; padding: 60px 20px; color: #6b7280; font-size: 14px; }
     /* ================= SEARCHABLE STORE PICKER ================= */
 .store-picker { position: relative; }
 .store-picker-input {
@@ -517,23 +524,36 @@ function saveData(){
 const DataLayer = {
 
     /* ─── NEW: Paginated fetch to bypass PostgREST 1000-row cap ─── */
-    async fetchAll(table, opts = {}) {
+     async fetchAll(table, opts = {}) {
         if (CLOUD_MODE === 'local') return { data: [], error: null };
         const PAGE = 1000;
-        let from = 0;
-        let all = [];
-        while (true) {
-            let q = SB.from(table).select(opts.select || '*').range(from, from + PAGE - 1);
+
+        let firstQ = SB.from(table).select(opts.select || '*', { count: 'exact' }).range(0, PAGE - 1);
+        if (opts.order) firstQ = firstQ.order(opts.order, { ascending: opts.ascending ?? true });
+        if (opts.eq)    for (const [k, v] of Object.entries(opts.eq))   firstQ = firstQ.eq(k, v);
+        if (opts.in)    for (const [k, arr] of Object.entries(opts.in)) firstQ = firstQ.in(k, arr);
+
+        const { data: firstPage, error: e1, count } = await firstQ;
+        if (e1) return { data: [], error: e1 };
+        if (!firstPage || firstPage.length === 0) return { data: [], error: null };
+
+        const total = count || firstPage.length;
+        if (total <= PAGE) return { data: firstPage, error: null };
+
+        const pagesNeeded = Math.ceil(total / PAGE);
+        const pending = [];
+        for (let p = 1; p < pagesNeeded; p++) {
+            let q = SB.from(table).select(opts.select || '*').range(p * PAGE, (p + 1) * PAGE - 1);
             if (opts.order) q = q.order(opts.order, { ascending: opts.ascending ?? true });
             if (opts.eq)    for (const [k, v] of Object.entries(opts.eq))   q = q.eq(k, v);
             if (opts.in)    for (const [k, arr] of Object.entries(opts.in)) q = q.in(k, arr);
-            if (opts.limit) q = q.limit(opts.limit);
-            const { data, error } = await q;
-            if (error) return { data: all, error };
-            if (!data || data.length === 0) break;
-            all = all.concat(data);
-            if (data.length < PAGE) break;
-            from += PAGE;
+            pending.push(q);
+        }
+        const results = await Promise.all(pending);
+        let all = [...firstPage];
+        for (const r of results) {
+            if (r.error) return { data: all, error: r.error };
+            all = all.concat(r.data || []);
         }
         return { data: all, error: null };
     },
@@ -567,7 +587,6 @@ const DataLayer = {
         if (CLOUD_MODE === 'local') {
             return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || defaultData();
         }
-
         const [stores, items, bom, employees, profiles,
                salesUploads, ledger, openings, journals] = await Promise.all([
             SB.from('stores').select('*').eq('status','Active'),
@@ -578,7 +597,9 @@ const DataLayer = {
             SB.from('sales_uploads').select('*').order('created_at', { ascending: false }).limit(500),
             SB.from('consumption_ledger').select('*').order('created_at', { ascending: false }).limit(500),
             SB.from('opening_stock').select('*').order('created_at', { ascending: false }).limit(500),
-            SB.from('journals').select('*').eq('type', 'daily').order('created_at', { ascending: false }).limit(500)
+            // Journals — fetch header only; journal_lines fetched separately
+            SB.from('journals').select('id, store_id, type, date, month, by_id, by_name, status, created_at, audit_stage, opening_upload_ref, opening_lines, acknowledged_by_id, acknowledged_by_name, acknowledged_at, action_plan, action_plan_by, action_plan_at')
+                .eq('type', 'daily').order('created_at', { ascending: false }).limit(500)
         ]);
 
         if (stores.error) throw stores.error;
@@ -1307,10 +1328,16 @@ function isAdmin(){ const u = currentUser(); return u && u.role==='admin'; }
 
 /* ---------- LOGIN ---------- */
 async function doLogin(){
+    const err = document.getElementById('loginError');
+    const btn = document.querySelector('.login-btn');
+    const oldBtnText = btn.textContent;
     try {
         const uname = document.getElementById('loginUser').value.trim().toLowerCase();
         const pass  = document.getElementById('loginPass').value;
-        const err   = document.getElementById('loginError');
+
+        err.style.display = 'none';
+        btn.disabled = true;
+        btn.textContent = 'Signing in...';
 
         if (CLOUD_MODE === 'supabase') {
             const email = uname.includes('@') ? uname : (uname + '@drcafe.com');
@@ -1318,23 +1345,58 @@ async function doLogin(){
             if (error) {
                 err.textContent = 'Invalid email or password.';
                 err.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = oldBtnText;
                 return;
             }
-            err.style.display = 'none';
+
+            // Show app shell immediately with loading state
+            document.getElementById('loginScreen').style.display = 'none';
+            document.getElementById('appScreen').style.display = 'block';
+            document.getElementById('pageContainer').innerHTML = `
+                <div class="loading-block">
+                    <div class="spinner"></div>
+                    <p style="margin-top:14px">Loading your data...</p>
+                </div>`;
+            document.getElementById('userName').textContent = 'Loading...';
+            document.getElementById('userRole').textContent = '';
+            document.getElementById('userAvatar').textContent = '⏳';
+
+            // Now load the data in the background
             DB = await loadData();
-            window._cloudMe = DB.users.find(u => (u.email||'').toLowerCase() === email.toLowerCase()) || null;
+            const { data: { user: authUser } } = await SB.auth.getUser();
+            window._cloudMe = authUser ? (DB.users.find(u => u.id === authUser.id) || null) : null;
+
+            if (!window._cloudMe) {
+                // Auth passed but no profile — logout
+                err.textContent = 'No profile found for your account. Contact an Admin.';
+                err.style.display = 'block';
+                await SB.auth.signOut();
+                document.getElementById('loginScreen').style.display = 'flex';
+                document.getElementById('appScreen').style.display = 'none';
+                btn.disabled = false;
+                btn.textContent = oldBtnText;
+                return;
+            }
+
             await bootApp();
+            btn.disabled = false;
+            btn.textContent = oldBtnText;
             return;
         }
 
+        // Local mode (unused when CLOUD_MODE='supabase')
         const user = DB.users.find(u => u.username===uname && u.pass===pass && u.active);
-        if (!user) { err.textContent = 'Invalid username or password.'; err.style.display='block'; return; }
-        err.style.display = 'none';
+        if (!user) { err.textContent = 'Invalid username or password.'; err.style.display='block'; btn.disabled = false; btn.textContent = oldBtnText; return; }
         setSession(uname);
         await bootApp();
+        btn.disabled = false;
+        btn.textContent = oldBtnText;
     } catch(e) {
-        document.getElementById('loginError').textContent = 'Error: ' + e.message;
-        document.getElementById('loginError').style.display = 'block';
+        err.textContent = 'Error: ' + e.message;
+        err.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = oldBtnText;
     }
 }
 async function doLogout(){
@@ -1353,7 +1415,10 @@ async function bootApp(){
             document.getElementById('appScreen').style.display = 'none';
             return;
         }
-        DB = await loadData();
+        // If DB already loaded by doLogin, skip re-fetch
+        if (!DB || !DB.users || DB.users.length === 0) {
+            DB = await loadData();
+        }
         const { data: { user: authUser } } = await SB.auth.getUser();
         window._cloudMe = authUser ? (DB.users.find(u => u.id === authUser.id) || null) : null;
     }
