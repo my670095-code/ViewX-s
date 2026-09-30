@@ -4138,13 +4138,13 @@ function renderViewRows(){
     const showRemark = stage === 'acknowledged';
 
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
- let rows = j.lines.map(l => {
+let rows = j.lines.map(l => {
     const it = getItem(l.itemId);
     return {
         code: it?it.code:'', name: it?it.name:'Unknown', uom: l.uom,
         opening: l.opening, consumption: l.consumption,
         expected: l.expected, physical: l.physical, variance: l.variance||0,
-        store_remark: l.storeRemark || l.store_remark || ''   // ← ADD
+        store_remark: l.storeRemark || l.store_remark || ''
     };
 });
     if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
@@ -4235,18 +4235,36 @@ async function regenerateJournal(id){
     if (j.status !== 'Submitted') { toast('Only submitted journals can be recalculated', 'error'); return; }
   if (!confirm(`Recalculate "${j.id}"?\n\nThis will re-read consumption for ${j.date} and update Expected / Variance on this surprise check.`)) return;
     const rebuilt = buildCountLines({
-        storeId: j.storeId,
-        type: 'daily',
-        date: j.date,
-        month: j.month,
-        openingLines: j.openingLines || [],
-        createdAt: j.createdAt
-    });
-    const oldPhysical = {};
-    j.lines.forEach(l => { oldPhysical[l.itemId] = Number(l.physical) || 0; });
-        const newLines = rebuilt.lines
-        .map(l => { /* existing map */ })
-        .filter(l => l.physical !== 0 && l.physical !== null && !isNaN(l.physical));
+    storeId: j.storeId,
+    type: 'daily',
+    date: j.date,
+    month: j.month,
+    openingLines: j.openingLines || [],
+    createdAt: j.createdAt
+});
+
+const oldPhysical = {};
+j.lines.forEach(l => { oldPhysical[l.itemId] = Number(l.physical) || 0; });
+
+const newLines = rebuilt.lines
+    .map(l => {
+        const phys = oldPhysical[l.itemId] !== undefined ? oldPhysical[l.itemId] : 0;
+        return {
+            itemId: l.itemId,
+            uom: l.uom,
+            opening: l.opening,
+            purchases: 0,
+            transfersIn: 0,
+            transfersOut: 0,
+            consumption: l.consumption,
+            expected: l.expected,
+            physical: phys,
+            variance: phys - l.expected,
+            mtdPurchases: 0,
+            mtdConsumption: l.mtdConsumption
+        };
+    })
+    .filter(l => l.physical !== 0 && l.physical !== null && !isNaN(l.physical));
         const phys = oldPhysical[l.itemId] !== undefined ? oldPhysical[l.itemId] : 0;
         return {
             itemId: l.itemId,
