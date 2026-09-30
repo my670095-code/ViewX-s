@@ -3825,23 +3825,8 @@ function updateCountProgress(){
     if (a) a.textContent = entered;
     if (b) b.textContent = entered;
 }
-function updateCountLine(idx, value){
-    const j = window._workingCount;
-    if (!j) return;
-    const line = j.lines[idx];
-    line.physical = Number(value) || 0;
-    line.variance = line.physical - line.expected;
-    updateCountProgress();
-}
-function updateCountProgress(){
-    const j = window._workingCount;
-    if (!j) return;
-    const entered = j.lines.filter(l => l.physical !== 0).length;
-    const a = document.getElementById('cEntered');
-    const b = document.getElementById('cEnteredFoot');
-    if (a) a.textContent = entered;
-    if (b) b.textContent = entered;
-}
+
+
 function filterCountRows(){
     const q = (document.getElementById('cSearch').value || '').toLowerCase();
     document.querySelectorAll('#countBody tr').forEach(tr => {
