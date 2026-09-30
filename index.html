@@ -4671,12 +4671,9 @@ function openOpeningImportModal(){
     _openImportParsed = null;
     const months = getAvailableMonths();
     const defaultMonth = getCurrentMonthTag();
-    const storeOptions = myStores.length === 1
-        ? `<option value="${myStores[0].id}" selected>${esc(storeLabel(myStores[0].id))}</option>`
-        : myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('');
     openModal('Import Opening Stock from Excel', `
         <div class="info-block">
-                        <b>How it works:</b> Upload any Excel with a header row containing <code>SKU</code> and <code>Counted</code> columns.
+            <b>How it works:</b> Upload any Excel with a header row containing <code>SKU</code> and <code>Counted</code> columns.
         </div>
         <div class="form-grid">
             <div class="form-row"><label>Month *</label>
@@ -4684,7 +4681,7 @@ function openOpeningImportModal(){
             </div>
             <div class="form-row"><label>Date *</label><input type="date" id="openImpDate" value="${todayISO()}"></div>
         </div>
-        <div class="form-row"><label>Store *</label><select id="openImpStore">${storeOptions}</select></div>
+        <div class="form-row"><label>Store *</label>${storePickerHTML('openImpStore', myStores[0]?.id || '', 'Search store by code or name...')}</div>
         <div class="upload-drop" onclick="document.getElementById('openImpFile').click()">
             <div class="upload-icon">📊</div>
             <div class="upload-text">Click to upload Excel</div>
