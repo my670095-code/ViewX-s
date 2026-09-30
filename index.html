@@ -4062,6 +4062,8 @@ async function submitCount(){
     try {
         if (CLOUD_MODE === 'supabase') {
             await DataLayer.submitJournal(j);
+            // Mirror the submitted journal into local DB so the UI updates immediately
+            DB.journals.push(j);
         } else {
             DB.journals.push(j);
         }
