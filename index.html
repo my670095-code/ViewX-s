@@ -3476,6 +3476,73 @@ function viewSalesUpload(id){
     document.getElementById('modalFooter').innerHTML = `<button class="btn-light" onclick="closeModal()">Close</button>`;
     document.getElementById('modalOverlay').classList.add('show');
 }
+    
+/* ══════════════════════════════════════════════════════════════
+   SURPRISE AUDIT — MAIN PAGE RENDERER
+   ══════════════════════════════════════════════════════════════ */
+function renderCountPage(){
+    const u = currentUser();
+    const canCreate = can('createSurpriseAudit');
+    const isStoreUser = u.role === 'store';
+    const myStoreIds = new Set(getMyStores(u));
+    const myStores = DB.stores.filter(s => myStoreIds.has(s.id));
+    const allJournals = DB.journals.filter(j => myStoreIds.has(j.storeId));
+
+    const totalPending = isStoreUser
+        ? allJournals.filter(j => (j.auditStage || j.audit_stage) === 'awaiting_store').length
+        : 0;
+
+    return `
+    <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
+
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:11px 14px;margin-bottom:16px;font-size:12.5px;color:#1e40af">
+        <b>How it works:</b> Area Manager uploads opening stock, then enters physical counts.
+        Store team adds remarks per variance item and submits an action plan.
+    </div>
+
+    ${isStoreUser && totalPending > 0 ? `
+    <div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:14px;color:#92400e">
+        <b>🔔 ${totalPending} audit${totalPending > 1 ? 's' : ''} awaiting your response</b>
+        — open them below to add remarks and action plan.
+    </div>` : ''}
+
+    <div class="toolbar">
+        <select id="dailyStoreFilter" onchange="filterJournals()">
+            <option value="">All Stores (in scope)</option>
+            ${myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('')}
+        </select>
+        <select id="dailyStageFilter" onchange="filterJournals()">
+            <option value="">All Audits</option>
+            <option value="awaiting_store"${isStoreUser ? ' selected' : ''}>Awaiting ${isStoreUser ? 'My' : 'Store'} Response</option>
+            <option value="acknowledged">Acknowledged</option>
+        </select>
+        ${canCreate ? `<button class="btn-primary" onclick="openAuditWizard()">+ New Surprise Audit</button>` : ''}
+    </div>
+
+    ${myStores.length === 0 && canCreate ? `<div class="warn-box">⚠ No stores in your scope yet.</div>` : ''}
+
+    <div class="panel">
+        <div class="panel-header">
+            <div class="panel-title">Surprise Audits</div>
+            <span class="badge badge-blue" id="auditCount">${allJournals.length} audits</span>
+        </div>
+        <div class="panel-body" id="dailyListBody">${renderCountList(allJournals)}</div>
+    </div>`;
+}
+
+function filterJournals(){
+    const sf = document.getElementById('dailyStoreFilter')?.value || '';
+    const stageF = document.getElementById('dailyStageFilter')?.value || '';
+    const myStoreIds = new Set(getMyStores());
+    let rows = DB.journals.filter(j => myStoreIds.has(j.storeId));
+    if (sf) rows = rows.filter(j => j.storeId === sf);
+    if (stageF) rows = rows.filter(j => (j.auditStage || j.audit_stage) === stageF);
+    document.getElementById('dailyListBody').innerHTML = renderCountList(rows);
+    const cnt = document.getElementById('auditCount');
+    if (cnt) cnt.textContent = rows.length + ' audits';
+}
+
+RENDERERS.daily = () => renderCountPage();
 
 function renderCountList(rows){
     if (rows.length === 0) return '<div class="empty">No audits in scope</div>';
