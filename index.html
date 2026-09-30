@@ -441,16 +441,15 @@ const ROLE_LABEL = {
 };
 
 const PERMISSIONS = {
-    admin:     ['dashboard','opening','sales','daily','items','bom','stores','employees','reports','users','recycle','backup'],
-    opmanager: ['dashboard','opening','sales','daily','items','bom','stores','employees','reports'],
-    area:      ['dashboard','opening','sales','daily','items','bom','stores','employees','reports'],
-    store:     ['dashboard','opening','sales','daily','items','bom','employees','reports'],
-    wh:        ['dashboard','opening','sales','daily','items','bom','reports'],
+    admin:     ['dashboard','sales','daily','items','bom','stores','employees','reports','users','recycle','backup'],
+    opmanager: ['dashboard','sales','daily','items','bom','stores','employees','reports'],
+    area:      ['dashboard','sales','daily','items','bom','stores','employees','reports'],
+    store:     ['dashboard','sales','daily','items','bom','employees','reports'],
+    wh:        ['dashboard','sales','daily','items','bom','reports'],
     viewer:    ['dashboard','reports']
 };
 
 const ACTIONS = {
-    createOpening:       ['admin','opmanager','area','store'],
     uploadSales:         ['admin','opmanager','area','store','wh'],
     createInventory:     ['admin','opmanager','area','store'],
     createSurpriseAudit: ['admin','opmanager','area'],   // ← NEW
@@ -472,8 +471,8 @@ function defaultData(){
         users: [
             { id:'u-admin', username:'admin', pass:'1234', name:'Administrator', role:'admin', initials:'AD', active:true, createdAt:nowISO() }
         ],
-        stores: [], items: [], bom: [], employees: [],
-        openingStock: [], salesUploads: [], consumptionLedger: [],
+                stores: [], items: [], bom: [], employees: [],
+        salesUploads: [], consumptionLedger: [],
         journals: [],
         closedMonths: [], voidedRecords: [], auditLog: []
     };
@@ -588,7 +587,7 @@ const DataLayer = {
             return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || defaultData();
         }
         const [stores, items, bom, employees, profiles,
-               salesUploads, ledger, openings, journals] = await Promise.all([
+               salesUploads, ledger, journals] = await Promise.all([
             SB.from('stores').select('*').eq('status','Active'),
             this.fetchAll('items',       { order: 'id' }),
             this.fetchAll('bom',         { order: 'id' }),
@@ -596,25 +595,20 @@ const DataLayer = {
             SB.from('profiles').select('*'),
             SB.from('sales_uploads').select('*').order('created_at', { ascending: false }).limit(500),
             SB.from('consumption_ledger').select('*').order('created_at', { ascending: false }).limit(500),
-            SB.from('opening_stock').select('*').order('created_at', { ascending: false }).limit(500),
-            // Journals — fetch header only; journal_lines fetched separately
-            SB.from('journals').select('id, store_id, type, date, month, by_id, by_name, status, created_at, audit_stage, opening_upload_ref, opening_lines, acknowledged_by_id, acknowledged_by_name, acknowledged_at, action_plan, action_plan_by, action_plan_at')
-                .eq('type', 'daily').order('created_at', { ascending: false }).limit(500)
+            SB.from('journals').select('*').eq('type', 'daily').order('created_at', { ascending: false }).limit(500)
         ]);
 
         if (stores.error) throw stores.error;
 
-        const bomIds       = (bom.data || []).map(b => b.id);
+              const bomIds       = (bom.data || []).map(b => b.id);
         const uploadIds    = (salesUploads.data || []).map(s => s.id);
         const ledgerIds    = (ledger.data || []).map(c => c.id);
-        const openingIds   = (openings.data || []).map(o => o.id);
         const journalIds   = (journals.data || []).map(j => j.id);
 
-        const [bomLines, salesLines, ledgerLines, openingLines, journalLines] = await Promise.all([
+        const [bomLines, salesLines, ledgerLines, journalLines] = await Promise.all([
             bomIds.length     ? this.fetchAll('bom_lines',                { order: 'id', in: { bom_id: bomIds } }) : { data: [] },
             uploadIds.length  ? this.fetchAll('sales_upload_lines',       { order: 'id', in: { upload_id: uploadIds } }) : { data: [] },
             ledgerIds.length  ? this.fetchAll('consumption_ledger_lines', { order: 'id', in: { ledger_id: ledgerIds } }) : { data: [] },
-            openingIds.length ? this.fetchAll('opening_stock_lines',      { order: 'id', in: { opening_id: openingIds } }) : { data: [] },
             journalIds.length ? this.fetchAll('journal_lines',            { order: 'id', in: { journal_id: journalIds } }) : { data: [] }
         ]);
 
@@ -673,15 +667,6 @@ const DataLayer = {
                 lines: (ledgerLines.data || []).filter(l => l.ledger_id === c.id).map(l => ({
                     itemId: l.item_id, qty: Number(l.qty), uom: l.uom,
                     breakdown: l.breakdown || []
-                }))
-            })),
-
-            openingStock: (openings.data || []).map(o => ({
-                id: o.id, storeId: o.store_id, month: o.month, date: o.date,
-                byId: o.by_id, byName: o.by_name, status: o.status,
-                rolledFrom: null, createdAt: o.created_at,
-                lines: (openingLines.data || []).filter(l => l.opening_id === o.id).map(l => ({
-                    itemId: l.item_id, qty: Number(l.qty), uom: l.uom
                 }))
             })),
 
@@ -833,33 +818,6 @@ const DataLayer = {
             if (e3) throw e3;
         }
     },
-
-    async insertOpening(opening) {
-        if (CLOUD_MODE === 'local') return;
-        const { error: e1 } = await SB.from('opening_stock').insert({
-            id: opening.id,
-            store_id: opening.storeId,
-            month: opening.month,
-            date: opening.date,
-            by_id: opening.byId,
-            by_name: opening.byName,
-            status: opening.status || 'Posted',
-            rolled_from: opening.rolledFrom || null
-        });
-        if (e1) throw e1;
-        if (opening.lines && opening.lines.length > 0) {
-            const { error: e2 } = await SB.from('opening_stock_lines').insert(
-                opening.lines.map(l => ({
-                    opening_id: opening.id,
-                    item_id: l.itemId,
-                    qty: l.qty,
-                    uom: l.uom
-                }))
-            );
-            if (e2) throw e2;
-        }
-    },
-
     async insertSalesUpload(upload, ledger) {
         if (CLOUD_MODE === 'local') return;
         const { error: e1 } = await SB.from('sales_uploads').insert({
@@ -1000,7 +958,6 @@ const ENTITIES = {
     bom: { key:'bom', label:'BOM', nameField:'productName' },
     employee: { key:'employees', label:'Employee', nameField:'name' },
     journal: { key:'journals', label:'Journal', nameField:'id' },
-    openingStock: { key:'openingStock', label:'Opening Stock', nameField:'id' },
     salesUp: { key:'salesUploads', label:'Sales Upload', nameField:'id' },
     user: { key:'users', label:'User', nameField:'username' }
 };
@@ -1009,8 +966,6 @@ function getDeleteBlockers(entityType, id){
     if (entityType === 'store') {
         const j = DB.journals.filter(x => x.storeId===id);
         if (j.length) blockers.push({ type:'Journal', count:j.length, preview:j.slice(0,5).map(x=>x.id) });
-        const o = DB.openingStock.filter(x => x.storeId===id);
-        if (o.length) blockers.push({ type:'Opening Stock', count:o.length, preview:o.slice(0,5).map(x=>x.id) });
         const s = DB.salesUploads.filter(x => x.storeId===id);
         if (s.length) blockers.push({ type:'Sales Upload', count:s.length, preview:s.slice(0,5).map(x=>x.id) });
     }
@@ -1041,13 +996,7 @@ function getDeleteBlockers(entityType, id){
             if (later.length) blockers.push({ type:'Later Journal', count:later.length, preview:later.slice(0,5).map(x=>x.id) });
         }
     }
-    if (entityType === 'openingStock') {
-        const o = DB.openingStock.find(x => x.id===id);
-        if (o) {
-            const monthJournals = DB.journals.filter(j => j.storeId === o.storeId && j.month === o.month && j.status === 'Submitted');
-            if (monthJournals.length) blockers.push({ type:'Journal', count:monthJournals.length, preview:monthJournals.slice(0,5).map(j=>j.id) });
-        }
-    }
+
     return blockers;
 }
 async function softDelete(entityType, id, reason){
@@ -1092,9 +1041,6 @@ async function softDelete(entityType, id, reason){
                 await SB.from('consumption_ledger').delete().eq('upload_ref', id);
                 await SB.from('sales_upload_lines').delete().eq('upload_id', id);
                 await SB.from('sales_uploads').delete().eq('id', id);
-            } else if (entityType === 'openingStock') {
-                await SB.from('opening_stock_lines').delete().eq('opening_id', id);
-                await SB.from('opening_stock').delete().eq('id', id);
             } else if (entityType === 'bom') {
                 await SB.from('bom_lines').delete().eq('bom_id', id);
                 await SB.from('bom').delete().eq('id', id);
@@ -1182,20 +1128,7 @@ async function restoreVoided(voidId){
                     })));
                     if (e2) throw e2;
                 }
-            } else if (v.entityType === 'openingStock') {
-                const { lines, ...header } = restored;
-                const { error: e1 } = await SB.from('opening_stock').insert({
-                    id: header.id, store_id: header.storeId, month: header.month, date: header.date,
-                    by_id: header.byId, by_name: header.byName, status: header.status
-                });
-                if (e1) throw e1;
-                if (lines?.length) {
-                    const { error: e2 } = await SB.from('opening_stock_lines').insert(lines.map(l => ({
-                        opening_id: header.id, item_id: l.itemId, qty: l.qty, uom: l.uom
-                    })));
-                    if (e2) throw e2;
-                }
-            } else if (v.entityType === 'store') {
+               } else if (v.entityType === 'store') {
                 await SB.from('stores').insert({
                     id: restored.id, code: restored.code, name: restored.name, area: restored.area,
                     type: restored.type, store_manager_name: restored.storeManagerName,
@@ -1486,8 +1419,7 @@ async function saveNewPassword(){
 const MENU_STRUCTURE = [
     { section:'Main' },
     { id:'dashboard', icon:'▦', label:'Dashboard' },
-    { section:'Inventory' },
-    { id:'opening', icon:'🔓', label:'Opening Stock' },
+     { section:'Inventory' },
     { id:'sales', icon:'🛒', label:'Sales Upload' },
    { id:'daily', icon:'◷', label:'Surprise Inv Check' },
     { section:'Master Data' },
@@ -1555,7 +1487,7 @@ function renderSidebar(){
 
 /* ---------- ROUTER ---------- */
 const TITLES = {
-    dashboard:'Inventory Dashboard', opening:'Opening Stock (Month Start)',
+    dashboard:'Inventory Dashboard',
     sales:'Sales Upload (BOM Explosion)',
    daily:'Surprise Inv Check',
     items:'Item Master', bom:'BOM / Recipe Management', stores:'Store Master',
@@ -1617,13 +1549,6 @@ function getLastJournalForStore(storeId, beforeISO){
     if (beforeISO) list = list.filter(j => j.createdAt < beforeISO);
     list.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
     return list[0] || null;
-}
-function getMonthOpening(storeId, itemId, monthTag){
-    const op = DB.openingStock
-        .filter(o => o.storeId===storeId && o.month===monthTag && o.status==='Posted')
-        .sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
-    if (!op) return null;
-    return op.lines.find(l => l.itemId === itemId) || null;
 }
 function sumConsumptionTagged(storeId, itemId, journal){
     const monthStart = monthStartISO(journal.month).slice(0,10);
@@ -1765,9 +1690,9 @@ RENDERERS.dashboard = function(){
     return `
     <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))} &nbsp;·&nbsp; ${myStoreIds.size} store(s) visible</div>
     <div class="cards">
-        <div class="card"><div class="card-label">Stores in Scope</div><div class="card-value">${visibleStores.length}</div></div>
-        <div class="card"><div class="card-label">Surprise Checks</div><div class="card-value green">${visibleJournals.length}</div></div>
-        <div class="card"><div class="card-label">Sales Uploads</div><div class="card-value blue">${DB.salesUploads.filter(s => myStoreIds.has(s.storeId)).length}</div></div>
+        <div class="card"><div class="card-label">Storage</div><div class="card-value">${sizeKB} KB</div></div>
+        <div class="card"><div class="card-label">Journals</div><div class="card-value">${DB.journals.length}</div></div>
+        <div class="card"><div class="card-label">Sales Uploads</div><div class="card-value">${DB.salesUploads.length}</div></div>
         <div class="card"><div class="card-label">BOMs</div><div class="card-value">${DB.bom.length}</div></div>
     </div>
     ${DB.stores.length === 0 ? `
@@ -4565,317 +4490,6 @@ const newLines = rebuilt.lines
         toast('Recalculate failed: ' + (err.message || err), 'error');
     }
 }
-
-/* ---------- OPENING ---------- */
-RENDERERS.opening = function(){
-    const u = currentUser();
-    const canCreate = can('createOpening');
-    const myStoreIds = new Set(getMyStores(u));
-    const myStores = DB.stores.filter(s => myStoreIds.has(s.id));
-    let openings = DB.openingStock.filter(o => myStoreIds.has(o.storeId)).slice().reverse();
-    return `
-    <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
-    <div class="toolbar">
-        <select id="opStoreFilter" onchange="filterOpenings()">
-            <option value="">All Stores</option>
-            ${myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('')}
-        </select>
-        ${canCreate ? `<button class="btn-primary" onclick="openOpeningSetup()">+ New Opening</button>` : ''}
-        ${canCreate ? `<button class="btn-light" onclick="openOpeningImportModal()">📥 Import from Excel</button>` : ''}
-    </div>
-    ${myStores.length === 0 && canCreate ? `<div class="warn-box">⚠ No stores in your scope yet.</div>` : ''}
-    <div class="panel">
-        <div class="panel-header"><div class="panel-title">Openings</div>
-        <span class="badge badge-blue">${openings.length}</span></div>
-        <div class="panel-body" id="openingListBody">${renderOpeningList(openings)}</div>
-    </div>`;
-};
-function renderOpeningList(openings){
-    if (openings.length === 0) return '<div class="empty">No openings yet</div>';
-    return `<table><thead><tr><th>No.</th><th>Month</th><th>Store</th><th>Date</th><th>Value</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody>${openings.map(o => {
-            const tv = o.lines.reduce((s,l) => s + (l.qty * (getItem(l.itemId)?.cost||0)), 0);
-            return `<tr>
-                <td><b>${esc(o.id)}</b></td><td>${esc(o.month)}</td>
-                <td>${esc(storeLabel(o.storeId))}</td><td>${esc(o.date)}</td>
-                <td>SAR ${fmtNum(tv)}</td>
-                <td>${badge(o.status)}</td>
-                <td class="actions-cell">
-                    <button class="btn-light btn-xs" onclick="viewOpening('${o.id}')">View</button>
-                    ${deleteBtn('openingStock', o.id)}
-                </td></tr>`;
-        }).join('')}</tbody></table>`;
-}
-function filterOpenings(){
-    const sf = document.getElementById('opStoreFilter').value;
-    const myStoreIds = new Set(getMyStores());
-    let rows = DB.openingStock.filter(o => myStoreIds.has(o.storeId)).slice().reverse();
-    if (sf) rows = rows.filter(o => o.storeId===sf);
-    document.getElementById('openingListBody').innerHTML = renderOpeningList(rows);
-}
-function openOpeningSetup(){
-    const u = currentUser();
-    const myStores = getMyStoreObjects(u);
-    if (myStores.length === 0) { toast('No stores in scope.', 'error'); return; }
-    if (DB.items.length === 0) { toast('Add items first.', 'error'); return; }
-    const months = getAvailableMonths();
-    const defaultMonth = getCurrentMonthTag();
-    openModal('New Opening', `
-        <div class="form-grid">
-            <div class="form-row"><label>Month</label><select id="opSetupMonth">${months.map(m => `<option value="${m}" ${m===defaultMonth?'selected':''}>${m}</option>`).join('')}</select></div>
-            <div class="form-row"><label>Date</label><input type="date" id="opSetupDate" value="${todayISO()}"></div>
-        </div>
-        <div class="form-row"><label>Store</label>${storePickerHTML('opSetupStore', myStores[0]?.id || '', 'Search store by code or name...')}</div>
-    `, `<button class="btn-light" onclick="closeModal()">Cancel</button>
-        <button class="btn-primary" onclick="startOpening()">Continue</button>`);
-}
-function startOpening(){
-    const month = document.getElementById('opSetupMonth').value;
-    const date = document.getElementById('opSetupDate').value;
-    const storeId = document.getElementById('opSetupStore').value;
-    const u = currentUser();
-    if (!isInScope(storeId, u)) { toast('Access denied.', 'error'); return; }
-    const items = DB.items.filter(i => i.status==='Active');
-    const journalNo = nextMovementId('OPN', DB.openingStock, date);
-    window._workingOpening = { id: journalNo, storeId, month, date, byId: u.id, byName: u.name, status:'Draft', lines: items.map(it => ({ itemId: it.id, qty: 0, uom: it.uom })) };
-    openOpeningSheet();
-}
-function openOpeningSheet(){
-    const o = window._workingOpening;
-    const modalBox = document.getElementById('modalBox');
-    modalBox.className = 'modal modal-xl';
-    document.getElementById('modalTitle').innerHTML = `Opening <span style="color:#2563eb">${esc(o.id)}</span>`;
-    document.getElementById('modalBody').innerHTML = `
-        <div class="journal-meta">
-            <div><div class="k">Month</div><div class="v">${esc(o.month)}</div></div>
-            <div><div class="k">Store</div><div class="v">${esc(storeLabel(o.storeId))}</div></div>
-            <div><div class="k">Date</div><div class="v">${esc(o.date)}</div></div>
-            <div><div class="k">Items</div><div class="v">${o.lines.length}</div></div>
-        </div>
-        <div class="journal-table-wrap"><table><thead><tr>
-            <th>Code</th><th>Item</th><th>UOM</th><th>Qty</th><th>Cost</th><th>Value</th>
-        </tr></thead><tbody id="openingBody">${o.lines.map((l, idx) => {
-            const item = getItem(l.itemId), cost = item ? item.cost : 0;
-            return `<tr data-idx="${idx}">
-                <td>${esc(item?item.code:'?')}</td><td>${esc(item?item.name:'Unknown')}</td><td>${esc(l.uom)}</td>
-                <td><input type="number" step="0.01" value="${l.qty}" oninput="updateOpeningLine(${idx},this.value)"></td>
-                <td class="readonly-cell">${fmtNum(cost)}</td>
-                <td class="readonly-cell" id="opVal${idx}">${fmtNum(l.qty*cost)}</td></tr>`;
-        }).join('')}</tbody></table></div>
-    `;
-    document.getElementById('modalFooter').innerHTML = `
-        <div style="flex:1;font-size:12px;color:#6b7280;align-self:center">Total: <b id="opTotalValue" style="color:#2563eb">SAR 0.00</b></div>
-        <button class="btn-light" onclick="closeModal()">Cancel</button>
-        <button class="btn-success" onclick="submitOpening()">Post</button>`;
-    document.getElementById('modalOverlay').classList.add('show');
-    updateOpeningProgress();
-}
-function updateOpeningLine(idx, value){
-    const o = window._workingOpening;
-    o.lines[idx].qty = Number(value) || 0;
-    const item = getItem(o.lines[idx].itemId);
-    document.getElementById('opVal'+idx).textContent = fmtNum(o.lines[idx].qty * (item ? item.cost : 0));
-    updateOpeningProgress();
-}
-function updateOpeningProgress(){
-    const o = window._workingOpening;
-    const total = o.lines.reduce((s,l) => s + (l.qty * (getItem(l.itemId)?.cost || 0)), 0);
-    document.getElementById('opTotalValue').textContent = 'SAR ' + fmtNum(total);
-}
-async function submitOpening(){
-    const o = window._workingOpening;
-    if (!o) return;
-    if (!o.lines.some(l => l.qty !== 0)) { toast('Enter at least one qty', 'error'); return; }
-    o.status = 'Posted';
-    o.createdAt = nowISO();
-    try { await DataLayer.insertOpening(o); }
-    catch(err) { toast('Save failed: ' + (err.message || err), 'error'); return; }
-    DB.openingStock.push(o);
-    window._workingOpening = null;
-    closeModal();
-    toast(`Opening ${o.id} posted`, 'success');
-    showPage('opening');
-}
-function viewOpening(id){
-    const o = DB.openingStock.find(x => x.id===id);
-    if (!o) return;
-    const modalBox = document.getElementById('modalBox');
-    modalBox.className = 'modal modal-xl';
-    const tv = o.lines.reduce((s,l) => s + (l.qty * (getItem(l.itemId)?.cost || 0)), 0);
-    document.getElementById('modalTitle').innerHTML = `Opening <span style="color:#2563eb">${esc(o.id)}</span> ${badge(o.status)}`;
-    document.getElementById('modalBody').innerHTML = `
-        <div class="journal-meta">
-            <div><div class="k">Month</div><div class="v">${esc(o.month)}</div></div>
-            <div><div class="k">Store</div><div class="v">${esc(storeLabel(o.storeId))}</div></div>
-            <div><div class="k">Date</div><div class="v">${esc(o.date)}</div></div>
-            <div><div class="k">Total Value</div><div class="v">SAR ${fmtNum(tv)}</div></div>
-        </div>
-        <div class="journal-table-wrap"><table><thead><tr>
-            <th>Code</th><th>Item</th><th>UOM</th>
-            <th style="text-align:right">Qty</th><th style="text-align:right">Cost</th><th style="text-align:right">Value</th>
-        </tr></thead><tbody>${o.lines.map(l => {
-            const it = getItem(l.itemId), c = it ? it.cost : 0;
-            return `<tr>
-                <td>${esc(it?it.code:'?')}</td><td>${esc(it?it.name:'Unknown')}</td><td>${esc(l.uom)}</td>
-                <td style="text-align:right"><b>${fmtNum(l.qty)}</b></td>
-                <td style="text-align:right">${fmtNum(c)}</td>
-                <td style="text-align:right">${fmtNum(l.qty*c)}</td>
-            </tr>`;
-        }).join('')}</tbody></table></div>
-    `;
-    document.getElementById('modalFooter').innerHTML = `<button class="btn-light" onclick="closeModal()">Close</button>`;
-    document.getElementById('modalOverlay').classList.add('show');
-}
-let _openImportParsed = null;
-function openOpeningImportModal(){
-    if (!can('createOpening')) { toast('Access denied.', 'error'); return; }
-    const u = currentUser();
-    const myStores = getMyStoreObjects(u);
-    if (myStores.length === 0) { toast('No stores in scope.', 'error'); return; }
-    if (DB.items.length === 0) { toast('Add items first.', 'error'); return; }
-    _openImportParsed = null;
-    const months = getAvailableMonths();
-    const defaultMonth = getCurrentMonthTag();
-    openModal('Import Opening Stock from Excel', `
-        <div class="info-block">
-            <b>How it works:</b> Upload any Excel with a header row containing <code>SKU</code> and <code>Counted</code> columns.
-        </div>
-        <div class="form-grid">
-            <div class="form-row"><label>Month *</label>
-                <select id="openImpMonth">${months.map(m => `<option value="${m}" ${m===defaultMonth?'selected':''}>${m}</option>`).join('')}</select>
-            </div>
-            <div class="form-row"><label>Date *</label><input type="date" id="openImpDate" value="${todayISO()}"></div>
-        </div>
-        <div class="form-row"><label>Store *</label>${storePickerHTML('openImpStore', myStores[0]?.id || '', 'Search store by code or name...')}</div>
-        <div class="upload-drop" onclick="document.getElementById('openImpFile').click()">
-            <div class="upload-icon">📊</div>
-            <div class="upload-text">Click to upload Excel</div>
-            <div class="upload-hint">.xlsx, .xls, .csv</div>
-        </div>
-        <input type="file" id="openImpFile" class="upload-file" accept=".xlsx,.xls,.csv" onchange="handleOpeningImportFile(event)">
-        <div id="openImpPreview" style="margin-top:16px"></div>
-    `, `
-        <button class="btn-light" onclick="closeModal()">Cancel</button>
-        <button class="btn-primary" id="openImpConfirmBtn" onclick="confirmOpeningImport()" disabled>Import</button>
-    `);
-}
-async function handleOpeningImportFile(evt){
-    const file = evt.target.files[0];
-    if (!file) return;
-    if (!XLSX_READY) { toast('Excel library still loading.', 'error'); evt.target.value=''; return; }
-    const reader = new FileReader();
-    reader.onload = function(e){
-        try {
-            const data = new Uint8Array(e.target.result);
-            const wb = XLSX.read(data, { type:'array', cellDates: true });
-            const sheet = wb.Sheets[wb.SheetNames[0]];
-            const aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
-            parseOpeningImport(aoa, file.name);
-        } catch(err) { toast('Parse failed: ' + err.message, 'error'); }
-    };
-    reader.readAsArrayBuffer(file);
-    evt.target.value = '';
-}
-function parseOpeningImport(aoa, filename){
-    if (!aoa || aoa.length === 0) { toast('File is empty', 'error'); return; }
-    const normCell = s => String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
-    let headerIdx = -1, skuCol = -1, qtyCol = -1, uomCol = -1;
-    for (let r = 0; r < aoa.length; r++) {
-        const row = aoa[r] || [];
-        const lowered = row.map(normCell);
-        const sIdx = lowered.findIndex(c => c === 'sku');
-        const qIdx = lowered.findIndex(c => c === 'counted');
-        if (sIdx >= 0 && qIdx >= 0) {
-            headerIdx = r; skuCol = sIdx; qtyCol = qIdx;
-            uomCol = lowered.findIndex(c => c === 'storageuom' || c === 'uom' || c === 'unit');
-            break;
-        }
-    }
-    if (headerIdx < 0) { toast('No header row with "SKU" and "Counted" found.', 'error'); return; }
-    const itemByCode = new Map();
-    DB.items.forEach(i => itemByCode.set(String(i.code).trim().toLowerCase(), i));
-    const valid = [], rejects = [], skippedZero = [];
-    const seen = new Set();
-    for (let r = headerIdx + 1; r < aoa.length; r++) {
-        const row = aoa[r] || [];
-        const skuRaw = String(row[skuCol] ?? '').trim();
-        const qtyRaw = row[qtyCol];
-        if (!skuRaw && (qtyRaw === '' || qtyRaw === undefined || qtyRaw === null)) continue;
-        const lineNo = r + 1;
-        if (!skuRaw) { rejects.push({ line: lineNo, reason: 'Missing SKU' }); continue; }
-        const sku = skuRaw.replace(/[^a-zA-Z0-9._-]/g, '');
-        if (seen.has(sku)) { rejects.push({ line: lineNo, reason: `Duplicate SKU "${sku}"` }); continue; }
-        seen.add(sku);
-        const item = itemByCode.get(sku.toLowerCase());
-        if (!item) { rejects.push({ line: lineNo, reason: `SKU "${sku}" not in Item Master` }); continue; }
-        const qty = Number(qtyRaw);
-                if (isNaN(qty)) { rejects.push({ line: lineNo, reason: `Invalid Counted "${qtyRaw}"` }); continue; }
-        valid.push({
-            itemId: item.id, itemCode: item.code, itemName: item.name, qty,
-            uom: (uomCol >= 0 && String(row[uomCol]||'').trim()) || item.uom || 'PCS'
-        });
-        if (qty === 0) skippedZero.push(sku);
-    }
-    _openImportParsed = { valid, rejects, filename, skippedZero };
-    const preview = document.getElementById('openImpPreview');
-    const sample = valid.slice(0, 12);
-    const totalValue = valid.reduce((s, r) => {
-        const it = getItem(r.itemId);
-        return s + (Number(r.qty) || 0) * (it ? (it.cost || 0) : 0);
-    }, 0);
-    preview.innerHTML = `
-        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:10px">
-            <b>File:</b> ${esc(filename)} · <span class="green"><b>${valid.length}</b> valid</span>
-            ${rejects.length ? ` · <span class="red">${rejects.length} rejected</span>` : ''}
-            · <b>Total: SAR ${fmtNum(totalValue)}</b>
-        </div>
-        ${sample.length > 0 ? `<div style="max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
-            <table style="font-size:12px"><thead><tr><th>SKU</th><th>Item</th><th style="text-align:right">Qty</th><th>UOM</th></tr></thead>
-            <tbody>${sample.map(r => `<tr><td>${esc(r.itemCode)}</td><td>${esc(r.itemName)}</td><td style="text-align:right">${fmtNum(r.qty)}</td><td>${esc(r.uom)}</td></tr>`).join('')}</tbody></table>
-        </div>` : ''}
-        ${rejects.length > 0 ? `<div style="margin-top:10px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px;font-size:12px;max-height:180px;overflow-y:auto">
-            <b style="color:#b91c1c">Rejected:</b>${rejects.slice(0,30).map(r => `<div>Line ${r.line}: ${esc(r.reason)}</div>`).join('')}</div>` : ''}
-    `;
-    const btn = document.getElementById('openImpConfirmBtn');
-    if (btn) btn.disabled = valid.length === 0;
-}
-async function confirmOpeningImport(){
-    const p = _openImportParsed;
-    if (!p) { toast('No file loaded', 'error'); return; }
-    if (p.valid.length === 0) { toast('No valid rows', 'error'); return; }
-    const u = currentUser();
-    const month = document.getElementById('openImpMonth').value;
-    const date  = document.getElementById('openImpDate').value;
-    const storeId = document.getElementById('openImpStore').value;
-    if (!month || !date || !storeId) { toast('Month, Date, and Store required', 'error'); return; }
-    if (!isInScope(storeId, u)) { toast('Access denied.', 'error'); return; }
-    const existing = DB.openingStock.find(o => o.storeId === storeId && o.month === month && o.status === 'Posted');
-    if (existing) {
-        if (!confirm(`⚠ An opening already exists for this store and month:\n\n  ${existing.id} — ${existing.month}\n\nAdd ANOTHER one?`)) return;
-    }
-    const btn = document.getElementById('openImpConfirmBtn');
-    btn.disabled = true; btn.textContent = 'Saving…';
-    try {
-        const id = nextMovementId('OPN', DB.openingStock, date);
-        const rec = {
-            id, storeId, month, date,
-            byId: u.id, byName: u.name, status: 'Posted', rolledFrom: null,
-            createdAt: nowISO(),
-            lines: p.valid.map(r => ({ itemId: r.itemId, qty: r.qty, uom: r.uom }))
-        };
-        await DataLayer.insertOpening(rec);
-        DB.openingStock.push(rec);
-        audit('IMPORT','opening', id, { file: p.filename, rows: p.valid.length, rejected: p.rejects.length, store: storeId, month });
-        _openImportParsed = null;
-        closeModal();
-        toast(`Opening ${id} imported — ${p.valid.length} items`, 'success');
-        showPage('opening');
-    } catch(err) {
-        btn.disabled = false; btn.textContent = 'Import';
-        toast('Import failed: ' + (err.message || err), 'error');
-    }
-}
-
 /* ---------- REPORTS ---------- */
 RENDERERS.reports = function(){
     const u = currentUser();
