@@ -253,6 +253,52 @@ input:focus, select:focus { outline:none; border-color:#1a7a4c; box-shadow:0 0 0
 .gate-details { background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px; padding:12px 14px; font-size:13px; line-height:1.9; margin-bottom:14px; }
 .gate-details .k { color:#6b7280; display:inline-block; min-width:100px; }
 .gate-hint { font-size:12.5px; color:#6b7280; margin-bottom:0; }
+    /* ================= SEARCHABLE STORE PICKER ================= */
+.store-picker { position: relative; }
+.store-picker-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    background: white;
+    cursor: text;
+}
+.store-picker-input:focus {
+    outline: none;
+    border-color: #1a7a4c;
+    box-shadow: 0 0 0 3px rgba(26,122,76,0.12);
+}
+.store-picker-list {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    max-height: 240px;
+    overflow-y: auto;
+    background: white;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.12);
+    z-index: 300;
+    margin-top: 4px;
+}
+.store-picker-option {
+    padding: 10px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    border-bottom: 1px solid #f3f4f6;
+}
+.store-picker-option:last-child { border-bottom: none; }
+.store-picker-option:hover { background: #f0fdf4; }
+.store-picker-option b { color: #1a7a4c; }
+.store-picker-empty {
+    padding: 14px;
+    font-size: 13px;
+    color: #9ca3af;
+    text-align: center;
+}
 
 @media(max-width:900px) {
     .cards { grid-template-columns:repeat(2,1fr); }
@@ -321,6 +367,66 @@ function todayISO(){ return new Date().toISOString().slice(0,10); }
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmtNum(n){ return Number(n||0).toFixed(2); }
 function norm(s){ return String(s||'').trim().toLowerCase(); }
+    /* ══════════════════════════════════════════════════════════════
+   Searchable Store Picker
+   ══════════════════════════════════════════════════════════════ */
+function storePickerHTML(pickerId, selectedId, placeholder){
+    const stores = getMyStoreObjects(currentUser());
+    const sel = selectedId ? stores.find(s => s.id === selectedId) : null;
+    const displayVal = sel ? `${sel.code} — ${sel.name}` : '';
+    const optionsHTML = stores.map(s =>
+        `<div class="store-picker-option" data-id="${s.id}" data-label="${esc(s.code)} — ${esc(s.name)}"
+              onclick="pickStore('${pickerId}', '${s.id}', '${esc(s.code)} — ${esc(s.name)}')">
+            <b>${esc(s.code)}</b> — ${esc(s.name)}
+         </div>`).join('');
+    return `
+    <div class="store-picker" id="${pickerId}_wrap">
+        <input type="text" class="store-picker-input" id="${pickerId}_input"
+               placeholder="${esc(placeholder || 'Search store...')}"
+               value="${esc(displayVal)}"
+               autocomplete="off"
+               oninput="filterStorePicker('${pickerId}')"
+               onfocus="openStorePicker('${pickerId}')">
+        <input type="hidden" id="${pickerId}" value="${esc(selectedId || '')}">
+        <div class="store-picker-list" id="${pickerId}_list" style="display:none">
+            ${optionsHTML || '<div class="store-picker-empty">No stores in scope</div>'}
+        </div>
+    </div>`;
+}
+
+function filterStorePicker(pickerId){
+    const input = document.getElementById(pickerId + '_input');
+    if (!input) return;
+    const q = (input.value || '').toLowerCase().trim();
+    document.querySelectorAll('#' + pickerId + '_list .store-picker-option').forEach(el => {
+        const match = !q || el.dataset.label.toLowerCase().includes(q);
+        el.style.display = match ? '' : 'none';
+    });
+}
+
+function openStorePicker(pickerId){
+    document.querySelectorAll('.store-picker-list').forEach(el => {
+        if (el.id !== pickerId + '_list') el.style.display = 'none';
+    });
+    const list = document.getElementById(pickerId + '_list');
+    if (list) list.style.display = 'block';
+}
+
+function pickStore(pickerId, storeId, label){
+    const hidden = document.getElementById(pickerId);
+    const input = document.getElementById(pickerId + '_input');
+    const list = document.getElementById(pickerId + '_list');
+    if (hidden) hidden.value = storeId;
+    if (input) input.value = label;
+    if (list) list.style.display = 'none';
+}
+
+// Close pickers when clicking outside
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.store-picker')) {
+        document.querySelectorAll('.store-picker-list').forEach(el => el.style.display = 'none');
+    }
+});
 
 const ROLE_LABEL = {
     admin:'Administrator', opmanager:'Operation Manager', area:'Area Manager',
