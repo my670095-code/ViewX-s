@@ -4518,8 +4518,8 @@ RENDERERS.reports = function(){
                 <tr><td>Sales Uploads Report</td><td><button class="btn-primary btn-sm" onclick="exportSalesCSV()">CSV</button></td></tr>
                 <tr><td>Exploded Consumption Report</td><td><button class="btn-primary btn-sm" onclick="exportExplodedCSV()">CSV</button></td></tr>
                 <tr><td>Inventory Journals Report</td><td><button class="btn-primary btn-sm" onclick="exportJournalsCSV()">CSV</button></td></tr>
-               <tr><td>Surprise Check Variance Report</td><td><button class="btn-primary btn-sm" onclick="exportDailyVarianceCSV()">CSV</button></td></tr>
-                <tr><td>Full Backup (JSON)</td><td><button class="btn-primary btn-sm" onclick="exportFullBackup()">Download</button></td></tr>
+                             <tr><td>Surprise Check Variance Report</td><td><button class="btn-primary btn-sm" onclick="exportDailyVarianceCSV()">CSV</button></td></tr>
+                ${isAdmin() ? `<tr><td>Full Backup (JSON)</td><td><button class="btn-primary btn-sm" onclick="exportFullBackup()">Download</button></td></tr>` : ''}
             </tbody></table>
         </div>
     </div>`;
@@ -4607,6 +4607,10 @@ function downloadCSV(rows, filename){
     toast('Exported '+filename, 'success');
 }
 function exportFullBackup(){
+    if (!isAdmin()) {
+        toast('Access denied — Admin only.', 'error');
+        return;
+    }
     const blob = new Blob([JSON.stringify(DB, null, 2)], { type:'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
