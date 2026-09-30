@@ -408,31 +408,86 @@ function saveData(){
 
 const DataLayer = {
 
+    /* ─── NEW: Paginated fetch to bypass PostgREST 1000-row cap ─── */
+    async fetchAll(table, opts = {}) {
+        if (CLOUD_MODE === 'local') return { data: [], error: null };
+        const PAGE = 1000;
+        let from = 0;
+        let all = [];
+        while (true) {
+            let q = SB.from(table).select(opts.select || '*').range(from, from + PAGE - 1);
+            if (opts.order) q = q.order(opts.order, { ascending: opts.ascending ?? true });
+            if (opts.eq)    for (const [k, v] of Object.entries(opts.eq))   q = q.eq(k, v);
+            if (opts.in)    for (const [k, arr] of Object.entries(opts.in)) q = q.in(k, arr);
+            if (opts.limit) q = q.limit(opts.limit);
+            const { data, error } = await q;
+            if (error) return { data: all, error };
+            if (!data || data.length === 0) break;
+            all = all.concat(data);
+            if (data.length < PAGE) break;
+            from += PAGE;
+        }
+        return { data: all, error: null };
+    },
+
+    async loadVoided() {
+        if (CLOUD_MODE === 'local') return [];
+        const { data } = await this.fetchAll('voided_records', { order: 'voided_at', ascending: false, limit: 500 });
+        return (data || []).map(v => ({
+            id: v.id,
+            entityType: v.entity_type,
+            originalId: v.original_id,
+            label: v.label,
+            snapshot: v.snapshot,
+            reason: v.reason,
+            voidedAt: v.voided_at,
+            voidedById: v.voided_by,
+            voidedByName: v.voided_by_name
+        }));
+    },
+
+    async loadAudit() {
+        if (CLOUD_MODE === 'local') return [];
+        const { data } = await this.fetchAll('audit_log', { order: 'at', ascending: false, limit: 500 });
+        return (data || []).map(a => ({
+            id: a.id, at: a.at, byId: a.by_id, byName: a.by_name,
+            action: a.action, entity: a.entity, entityId: a.entity_id, payload: a.payload
+        }));
+    },
+
     async loadAll() {
         if (CLOUD_MODE === 'local') {
             return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || defaultData();
         }
-        const me = await this.me();
-        const [stores, items, bom, bomLines, employees, profiles,
-               salesUploads, salesLines, ledger, ledgerLines,
-               openings, openingLines,
-               journals, journalLines] = await Promise.all([
+
+        const [stores, items, bom, employees, profiles,
+               salesUploads, ledger, openings, journals] = await Promise.all([
             SB.from('stores').select('*').eq('status','Active'),
-            SB.from('items').select('*'),
-            SB.from('bom').select('*'),
-            SB.from('bom_lines').select('*'),
+            this.fetchAll('items',       { order: 'id' }),
+            this.fetchAll('bom',         { order: 'id' }),
             SB.from('employees').select('*'),
             SB.from('profiles').select('*'),
             SB.from('sales_uploads').select('*').order('created_at', { ascending: false }).limit(500),
-            SB.from('sales_upload_lines').select('*'),
             SB.from('consumption_ledger').select('*').order('created_at', { ascending: false }).limit(500),
-            SB.from('consumption_ledger_lines').select('*'),
             SB.from('opening_stock').select('*').order('created_at', { ascending: false }).limit(500),
-            SB.from('opening_stock_lines').select('*'),
-            SB.from('journals').select('*').eq('type', 'daily').order('created_at', { ascending: false }).limit(500),
-            SB.from('journal_lines').select('*')
+            SB.from('journals').select('*').eq('type', 'daily').order('created_at', { ascending: false }).limit(500)
         ]);
+
         if (stores.error) throw stores.error;
+
+        const bomIds       = (bom.data || []).map(b => b.id);
+        const uploadIds    = (salesUploads.data || []).map(s => s.id);
+        const ledgerIds    = (ledger.data || []).map(c => c.id);
+        const openingIds   = (openings.data || []).map(o => o.id);
+        const journalIds   = (journals.data || []).map(j => j.id);
+
+        const [bomLines, salesLines, ledgerLines, openingLines, journalLines] = await Promise.all([
+            bomIds.length     ? this.fetchAll('bom_lines',                { order: 'id', in: { bom_id: bomIds } }) : { data: [] },
+            uploadIds.length  ? this.fetchAll('sales_upload_lines',       { order: 'id', in: { upload_id: uploadIds } }) : { data: [] },
+            ledgerIds.length  ? this.fetchAll('consumption_ledger_lines', { order: 'id', in: { ledger_id: ledgerIds } }) : { data: [] },
+            openingIds.length ? this.fetchAll('opening_stock_lines',      { order: 'id', in: { opening_id: openingIds } }) : { data: [] },
+            journalIds.length ? this.fetchAll('journal_lines',            { order: 'id', in: { journal_id: journalIds } }) : { data: [] }
+        ]);
 
         const bomWithLines = (bom.data || []).map(b => ({
             ...b,
@@ -470,8 +525,7 @@ const DataLayer = {
 
             salesUploads: (salesUploads.data || []).map(s => ({
                 id: s.id, filename: s.filename, storeId: s.store_id, date: s.date,
-                batchDate: s.date, inventoryType: 'daily',
-                month: s.month,
+                batchDate: s.date, inventoryType: 'daily', month: s.month,
                 totalRows: s.total_rows, validRows: s.valid_rows, rejectedRows: s.rejected_rows,
                 unitsSold: s.units_sold, byId: s.by_id, byName: s.by_name, status: s.status,
                 createdAt: s.created_at,
@@ -484,8 +538,7 @@ const DataLayer = {
                 id: c.upload_ref + '-LEDGER',
                 uploadRef: c.upload_ref,
                 storeId: c.store_id, date: c.date,
-                inventoryType: 'daily',
-                month: c.month,
+                inventoryType: 'daily', month: c.month,
                 source: c.source, byId: c.by_id, byName: c.by_name,
                 createdAt: c.created_at,
                 lines: (ledgerLines.data || []).filter(l => l.ledger_id === c.id).map(l => ({
@@ -510,8 +563,7 @@ const DataLayer = {
                 lines: (journalLines.data || []).filter(l => l.journal_id === j.id).map(l => ({
                     itemId: l.item_id, uom: l.uom,
                     opening: Number(l.opening),
-                    purchases: 0,
-                    transfersIn: 0, transfersOut: 0,
+                    purchases: 0, transfersIn: 0, transfersOut: 0,
                     consumption: Number(l.consumption),
                     expected: Number(l.expected),
                     physical: Number(l.physical), variance: Number(l.variance),
@@ -520,8 +572,8 @@ const DataLayer = {
             })),
 
             closedMonths: [],
-            voidedRecords: [],
-            auditLog: []
+            voidedRecords: await this.loadVoided(),
+            auditLog: await this.loadAudit()
         };
     },
 
@@ -755,10 +807,22 @@ const DataLayer = {
 function storageSizeKB(){ try { return Math.round((localStorage.getItem(STORAGE_KEY)||'').length/1024); } catch(e){ return 0; } }
 function audit(action, entity, entityId, payload){
     const u = currentUser();
-    DB.auditLog.push({ id:uid('log'), at:nowISO(), byId:u?u.id:null, byName:u?u.name:'system', action, entity, entityId, payload:payload||null });
+    const row = {
+        by_id: u?.id || null,
+        by_name: u?.name || 'system',
+        action, entity,
+        entity_id: entityId || null,
+        payload: payload || null
+    };
+    DB.auditLog.push({ id: uid('log'), at: nowISO(), ...row });
     if (DB.auditLog.length > 5000) DB.auditLog = DB.auditLog.slice(-5000);
-}
 
+    if (CLOUD_MODE === 'supabase') {
+        SB.from('audit_log').insert(row).then(({ error }) => {
+            if (error) console.warn('[audit] write failed:', error.message);
+        });
+    }
+}
 function getStore(id){ return DB.stores.find(s => s.id===id); }
 function getItem(id){ return DB.items.find(i => i.id===id); }
 function getStoreByCode(c){ return DB.stores.find(s => s.code===c); }
@@ -845,14 +909,35 @@ async function softDelete(entityType, id, reason){
     const idx = col.findIndex(x => x.id === id);
     if (idx < 0) return false;
     const record = col[idx];
+    const u = currentUser();
+
+    const snapshotPayload = {
+        entity_type: entityType,
+        original_id: id,
+        label: String(record[reg.nameField] || id),
+        snapshot: record,
+        reason: reason || '',
+        voided_by: u?.id || null,
+        voided_by_name: u?.name || 'system'
+    };
 
     if (CLOUD_MODE === 'supabase') {
+        const { data: voidedRow, error: vErr } = await SB
+            .from('voided_records')
+            .insert(snapshotPayload)
+            .select()
+            .single();
+        if (vErr) {
+            toast('Void snapshot failed: ' + vErr.message, 'error');
+            return false;
+        }
+
         try {
             if (entityType === 'journal') {
                 await SB.from('journal_lines').delete().eq('journal_id', id);
                 await SB.from('journals').delete().eq('id', id);
             } else if (entityType === 'salesUp') {
-                const { data: ledgerRow } = await SB.from('consumption_ledger').select('id').eq('upload_ref', id).single();
+                const { data: ledgerRow } = await SB.from('consumption_ledger').select('id').eq('upload_ref', id).maybeSingle();
                 if (ledgerRow?.id) {
                     await SB.from('consumption_ledger_lines').delete().eq('ledger_id', ledgerRow.id);
                 }
@@ -876,38 +961,137 @@ async function softDelete(entityType, id, reason){
             toast('Delete failed: ' + (err.message || err), 'error');
             return false;
         }
+
+        DB.voidedRecords.unshift({
+            id: voidedRow.id,
+            entityType,
+            originalId: id,
+            label: snapshotPayload.label,
+            snapshot: JSON.parse(JSON.stringify(record)),
+            reason: reason || '',
+            voidedAt: voidedRow.voided_at,
+            voidedById: u?.id,
+            voidedByName: u?.name || 'system'
+        });
+    } else {
+        DB.voidedRecords.push({
+            id: uid('void'), entityType, originalId: id,
+            label: record[reg.nameField] || id,
+            snapshot: JSON.parse(JSON.stringify(record)),
+            reason: reason || '', voidedAt: nowISO(),
+            voidedById: u?.id, voidedByName: u?.name || 'system'
+        });
     }
 
-    DB.voidedRecords.push({
-        id: uid('void'), entityType, originalId: id,
-        label: record[reg.nameField] || id,
-        snapshot: JSON.parse(JSON.stringify(record)),
-        reason: reason || '', voidedAt: nowISO(),
-        voidedById: currentUser()?.id, voidedByName: currentUser()?.name || 'system'
-    });
     col.splice(idx, 1);
     if (entityType === 'salesUp') DB.consumptionLedger = DB.consumptionLedger.filter(x => x.uploadRef !== id);
     audit('VOID', entityType, id, { reason: reason || '' });
     saveData();
     return true;
 }
-function restoreVoided(voidId){
+async function restoreVoided(voidId){
     const v = DB.voidedRecords.find(x => x.id === voidId);
     if (!v) return;
     const reg = ENTITIES[v.entityType];
     if (!reg) return;
-    const collision = DB[reg.key].find(x => x.id === v.originalId);
-    if (collision) v.snapshot.id = uid(reg.key.slice(0,3));
-    DB[reg.key].push(JSON.parse(JSON.stringify(v.snapshot)));
+
+    const restored = JSON.parse(JSON.stringify(v.snapshot));
+    const collision = DB[reg.key].find(x => x.id === restored.id);
+    if (collision) {
+        toast('Cannot restore — ID already exists', 'error');
+        return;
+    }
+
+    if (CLOUD_MODE === 'supabase') {
+        try {
+            if (v.entityType === 'bom') {
+                const { lines, ...header } = restored;
+                const { error: e1 } = await SB.from('bom').insert({
+                    id: header.id, product_id: header.productId, product_name: header.productName,
+                    cat: header.cat, version: header.version, effective: header.effective, status: header.status
+                });
+                if (e1) throw e1;
+                if (lines?.length) {
+                    const { error: e2 } = await SB.from('bom_lines').insert(lines.map(l => ({
+                        bom_id: header.id, item_id: l.itemId, item_code: l.itemCode,
+                        item_name: l.itemName, qty: l.qty, uom: l.uom
+                    })));
+                    if (e2) throw e2;
+                }
+            } else if (v.entityType === 'journal') {
+                const { lines, ...header } = restored;
+                const { error: e1 } = await SB.from('journals').insert({
+                    id: header.id, type: 'daily', date: header.date, month: header.month,
+                    store_id: header.storeId, by_id: header.byId, by_name: header.byName, status: header.status
+                });
+                if (e1) throw e1;
+                if (lines?.length) {
+                    const { error: e2 } = await SB.from('journal_lines').insert(lines.map(l => ({
+                        journal_id: header.id, journal_date: header.date, item_id: l.itemId, uom: l.uom,
+                        opening: l.opening, purchases: 0, transfers_in: 0, transfers_out: 0,
+                        consumption: l.consumption, expected: l.expected, physical: l.physical,
+                        variance: l.variance, mtd_purchases: 0, mtd_consumption: l.mtdConsumption
+                    })));
+                    if (e2) throw e2;
+                }
+            } else if (v.entityType === 'openingStock') {
+                const { lines, ...header } = restored;
+                const { error: e1 } = await SB.from('opening_stock').insert({
+                    id: header.id, store_id: header.storeId, month: header.month, date: header.date,
+                    by_id: header.byId, by_name: header.byName, status: header.status
+                });
+                if (e1) throw e1;
+                if (lines?.length) {
+                    const { error: e2 } = await SB.from('opening_stock_lines').insert(lines.map(l => ({
+                        opening_id: header.id, item_id: l.itemId, qty: l.qty, uom: l.uom
+                    })));
+                    if (e2) throw e2;
+                }
+            } else if (v.entityType === 'store') {
+                await SB.from('stores').insert({
+                    id: restored.id, code: restored.code, name: restored.name, area: restored.area,
+                    type: restored.type, store_manager_name: restored.storeManagerName,
+                    area_manager_name: restored.areaManagerName,
+                    operation_manager_name: restored.operationManagerName, status: restored.status
+                });
+            } else if (v.entityType === 'item') {
+                await SB.from('items').insert({
+                    id: restored.id, code: restored.code, name: restored.name, cat: restored.cat,
+                    uom: restored.uom, cost: restored.cost, daily: restored.daily,
+                    weekly: restored.weekly, monthly: restored.monthly, status: restored.status
+                });
+            } else if (v.entityType === 'employee') {
+                await SB.from('employees').insert({
+                    id: restored.id, code: restored.code, name: restored.name, role: restored.role, status: restored.status
+                });
+            } else if (v.entityType === 'salesUp') {
+                toast('Sales upload restore not yet supported', 'error');
+                return;
+            }
+
+            await SB.from('voided_records').delete().eq('id', voidId);
+        } catch(err) {
+            toast('Restore failed: ' + (err.message || err), 'error');
+            return;
+        }
+    }
+
+    DB[reg.key].push(restored);
     DB.voidedRecords = DB.voidedRecords.filter(x => x.id !== voidId);
     audit('RESTORE', v.entityType, v.originalId, {});
     saveData();
     toast('Restored', 'success');
 }
-function purgeVoided(voidId){
+async function purgeVoided(voidId){
     const v = DB.voidedRecords.find(x => x.id === voidId);
     if (!v) return;
-    if (!confirm(`Permanently delete "${v.label}"?`)) return;
+    if (!confirm(`Permanently delete "${v.label}"?\n\nThis cannot be undone.`)) return;
+
+    if (CLOUD_MODE === 'supabase') {
+        const { error } = await SB.from('voided_records').delete().eq('id', voidId);
+        if (error) { toast('Purge failed: ' + error.message, 'error'); return; }
+    }
+
     DB.voidedRecords = DB.voidedRecords.filter(x => x.id !== voidId);
     saveData();
     toast('Purged', 'success');
@@ -1093,10 +1277,14 @@ async function saveNewPassword(){
             if (error) throw error;
             const me = await DataLayer.me();
             await SB.from('profiles').update({ must_change_password: false }).eq('id', me.id);
+        } else {
+            const u = currentUser();
+            if (u) { u.pass = p1; u.mustChangePassword = false; saveData(); }
         }
         toast('Password updated', 'success');
         closeModal();
-        document.getElementById('pwBanner').style.display = 'none';
+        const pb = document.getElementById('pwBanner');
+        if (pb) pb.style.display = 'none';
     } catch(err) {
         toast('Failed: ' + (err.message || err), 'error');
     }
@@ -4107,13 +4295,19 @@ function renderRecycleTable(rows){
                 <td>${esc(v.voidedByName || '—')}</td>
                 <td style="font-size:11px">${new Date(v.voidedAt).toLocaleString()}</td>
                 <td class="actions-cell">
-                    <button class="btn-success btn-xs" onclick="restoreVoided('${v.id}');showPage('recycle');">Restore</button>
+                   <button class="btn-success btn-xs" onclick="restoreVoided('${v.id}').then(()=>showPage('recycle'))">Restore</button>
                     <button class="btn-danger btn-xs" onclick="purgeVoided('${v.id}')">Purge</button>
                 </td></tr>`).join('')}</tbody></table>`;
 }
-function emptyRecycleBin(){
+async function emptyRecycleBin(){
     if (DB.voidedRecords.length === 0) { toast('Already empty', 'error'); return; }
     if (!confirm(`Permanently delete ALL ${DB.voidedRecords.length} voided records?`)) return;
+
+    if (CLOUD_MODE === 'supabase') {
+        const { error } = await SB.from('voided_records').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        if (error) { toast('Empty failed: ' + error.message, 'error'); return; }
+    }
+
     DB.voidedRecords = [];
     saveData();
     toast('Recycle bin emptied', 'success');
