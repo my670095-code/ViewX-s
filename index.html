@@ -558,10 +558,20 @@ const DataLayer = {
                 }))
             })),
 
-            journals: (journals.data || []).map(j => ({
+               journals: (journals.data || []).map(j => ({
                 id: j.id, type: 'daily', date: j.date, month: j.month,
                 storeId: j.store_id, byId: j.by_id, byName: j.by_name,
                 status: j.status, createdAt: j.created_at,
+                auditStage: j.audit_stage || 'submitted',
+                audit_stage: j.audit_stage || 'submitted',
+                openingUploadRef: j.opening_upload_ref || null,
+                openingLines: j.opening_lines || null,
+                acknowledgedById: j.acknowledged_by_id || null,
+                acknowledgedByName: j.acknowledged_by_name || null,
+                acknowledgedAt: j.acknowledged_at || null,
+                actionPlan: j.action_plan || null,
+                actionPlanBy: j.action_plan_by || null,
+                actionPlanAt: j.action_plan_at || null,
                 lines: (journalLines.data || []).filter(l => l.journal_id === j.id).map(l => ({
                     itemId: l.item_id, uom: l.uom,
                     opening: Number(l.opening),
@@ -569,7 +579,13 @@ const DataLayer = {
                     consumption: Number(l.consumption),
                     expected: Number(l.expected),
                     physical: Number(l.physical), variance: Number(l.variance),
-                    mtdPurchases: 0, mtdConsumption: Number(l.mtd_consumption)
+                    mtdPurchases: 0, mtdConsumption: Number(l.mtd_consumption),
+                    storeRemark: l.store_remark || '',
+                    store_remark: l.store_remark || '',
+                    storeRemarkBy: l.store_remark_by || null,
+                    store_remark_by: l.store_remark_by || null,
+                    storeRemarkAt: l.store_remark_at || null,
+                    store_remark_at: l.store_remark_at || null
                 }))
             })),
 
@@ -772,7 +788,7 @@ const DataLayer = {
         }
     },
 
-    async submitJournal(journal) {
+     async submitJournal(journal) {
         if (CLOUD_MODE === 'local') return journal;
         const { data, error } = await SB.rpc('submit_journal', {
             p_header: {
@@ -784,7 +800,10 @@ const DataLayer = {
                 week: '',
                 by_id: journal.byId || '',
                 by_name: journal.byName,
-                status: journal.status || 'Submitted'
+                status: journal.status || 'Submitted',
+                audit_stage: journal.auditStage || 'awaiting_store',
+                opening_upload_ref: journal.openingUploadRef || null,
+                opening_lines: journal.openingLines || null
             },
             p_lines: journal.lines
         });
@@ -1342,10 +1361,21 @@ function renderSidebar(){
             if (!next.find(x => allowed.includes(x.id))) return;
             html += `<div class="menu-title">${m.section}</div>`;
         } else {
-            if (!allowed.includes(m.id)) return;
+                   if (!allowed.includes(m.id)) return;
+            let badgeHTML = '';
+            if (m.id === 'daily' && u.role === 'store') {
+                const pending = DB.journals.filter(j =>
+                    j.storeId === u.storeId &&
+                    (j.auditStage || j.audit_stage) === 'awaiting_store'
+                ).length;
+                if (pending > 0) {
+                    badgeHTML = `<span style="background:#f59e0b;color:white;font-size:10px;font-weight:bold;padding:2px 7px;border-radius:10px;margin-left:auto">${pending}</span>`;
+                }
+            }
             html += `<div class="menu-item" data-page="${m.id}" onclick="showPage('${m.id}')">
                         <div class="menu-icon">${m.icon}</div>
                         <span>${m.label}</span>
+                        ${badgeHTML}
                      </div>`;
         }
     });
@@ -4185,20 +4215,23 @@ function exportViewExcel(id){
         return String(a[s.key]).localeCompare(String(b[s.key])) * s.dir;
     });
     const store = getStore(j.storeId);
+      const stage = j.auditStage || j.audit_stage || 'submitted';
     const aoa = [
-        ['Journal No', j.id],
-     ['Type', 'surprise'],
+        ['Audit No', j.id],
+        ['Type', 'surprise'],
         ['Date', j.date],
         ['Store', store ? store.code + ' — ' + store.name : j.storeId],
         ['Month', j.month || ''],
-        ['Status', j.status],
+        ['Stage', stage],
         ['Submitted By', j.byName || ''],
+        ['Action Plan', j.actionPlan || ''],
+        ['Acknowledged By', j.acknowledgedByName || ''],
         [],
-        ['Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance']
+        ['Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','Store Remark']
     ];
     rows.forEach(r => aoa.push([
         r.code, r.name, r.uom, r.opening, r.consumption,
-        r.expected, r.physical, r.variance
+        r.expected, r.physical, r.variance, r.store_remark || ''
     ]));
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!cols'] = [{wch:14},{wch:32},{wch:8},{wch:10},{wch:12},{wch:10},{wch:10},{wch:10}];
@@ -4678,11 +4711,20 @@ function exportDailyVarianceCSV(){
     const myStoreIds = new Set(getMyStores());
     const rows = DB.journals.filter(j => myStoreIds.has(j.storeId) && j.type === 'daily');
     if (rows.length === 0) { toast('Nothing','error'); return; }
-    const out = [['Journal','Date','Store','Item Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','Value Impact','By']];
+       const out = [['Audit No','Date','Store','Stage','Item Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','Value Impact','Store Remark','Action Plan','Created By','Acknowledged By']];
     rows.forEach(j => j.lines.forEach(l => {
         const it = getItem(l.itemId);
         const valueImpact = (l.variance||0) * (it ? it.cost : 0);
-        out.push([j.id, j.date, storeLabel(j.storeId), it?it.code:'', it?it.name:'', l.uom, l.opening, l.consumption, l.expected, l.physical, l.variance, valueImpact.toFixed(2), j.byName]);
+        const stage = j.auditStage || j.audit_stage || 'submitted';
+        out.push([
+            j.id, j.date, storeLabel(j.storeId), stage,
+            it?it.code:'', it?it.name:'', l.uom,
+            l.opening, l.consumption, l.expected, l.physical, l.variance,
+            valueImpact.toFixed(2),
+            l.storeRemark || l.store_remark || '',
+            j.actionPlan || '',
+            j.byName, j.acknowledgedByName || ''
+        ]);
     }));
     downloadCSV(out, 'surprise_variance.csv');
 }
