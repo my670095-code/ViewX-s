@@ -4333,8 +4333,7 @@ const newLines = rebuilt.lines
         };
     })
     .filter(l => l.physical !== 0 && l.physical !== null && !isNaN(l.physical));
-   
-    });
+
     try {
         if (CLOUD_MODE === 'supabase') {
             const { error: delErr } = await SB.from('journal_lines').delete().eq('journal_id', j.id);
