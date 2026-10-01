@@ -3658,14 +3658,9 @@ async function processSalesRows(rows, filename, tag){
         //   regardless of what the Excel Store Code says.
         const rowStore = forcedStore;
 
-        const bom = getBOMByProductId(productId);
+              const bom = getBOMByProductId(productId);
         if (!bom) { rejects.push(`Row ${lineNo}: No BOM for Product ID "${productId}"`); return; }
-                // ★ Skip modifier SKUs — they are already exploded ingredient counts from the POS
-        //    and would be double-counted if run through the BOM again.
-        if (/^800/.test(productId)) {
-            tag._modifierSkipped = (tag._modifierSkipped || 0) + 1;
-            return;
-        }
+
         const qty = Number(qtyRaw);
         if (isNaN(qty) || qty <= 0) { rejects.push(`Row ${lineNo}: invalid Qty "${qtyRaw}"`); return; }
 
@@ -3748,19 +3743,25 @@ async function processSalesRows(rows, filename, tag){
     }
     audit('UPLOAD','sales','',{ valid:parsed.length, rejects:rejects.length, totalUnits });
     saveData();
-        const catSkipped = tag._categorySkipped || 0;
+
+    const catSkipped = tag._categorySkipped || 0;
     const modSkipped = tag._modifierSkipped || 0;
     const nonProductSkipped = catSkipped + modSkipped;
     const toastMsg =
         `Uploaded ${parsed.length} row(s), ${totalUnits} units` +
         (nonProductSkipped > 0 ? `, ${nonProductSkipped} non-product rows skipped` : '') +
         (rejects.length > 0 ? `, ${rejects.length} rejected` : '');
+
+    if (rejects.length > 0) {
         openModal('Upload Completed with Rejections', `
             <p style="font-size:13px;color:#6b7280;margin-bottom:12px">File: <b>${esc(filename)}</b></p>
             <div class="reject-list">${rejects.map(r => `<div>${esc(r)}</div>`).join('')}</div>
         `, `<button class="btn-primary" onclick="closeModal();showPage('sales')">OK</button>`);
         toast(toastMsg, 'success');
-    } else { toast(toastMsg, 'success'); showPage('sales'); }
+    } else {
+        toast(toastMsg, 'success');
+        showPage('sales');
+    }
 }
 function showRejectReport(rejects, filename){
     openModal('Upload Completed with Rejections', `
