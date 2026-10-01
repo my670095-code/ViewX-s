@@ -421,7 +421,7 @@ const StagedFiles = {
             r.onsuccess = res; r.onerror = () => rej(r.error);
         })));
     },
-    async cleanupOnLogin(ownerId, maxAgeDays = 7) {
+        async cleanupOnLogin(ownerId, maxAgeDays = 7) {
         const db = await this.open();
         const cutoff = Date.now() - maxAgeDays * 86400000;
         await new Promise((res, rej) => {
@@ -434,6 +434,26 @@ const StagedFiles = {
                 const v = c.value;
                 if (v.ownerId !== ownerId || (v.parsedAt || 0) < cutoff) c.delete();
                 c.continue();
+            };
+            req.onerror = () => rej(req.error);
+        });
+    },
+
+    /* Option B — find any staged entry regardless of owner (for viewing) */
+    async findAnyOwner(storeId, date, type) {
+        const db = await this.open();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readonly');
+            const idx = tx.objectStore('files').index('by_key');
+            const req = idx.openCursor(IDBKeyRange.bound(
+                ['', storeId, date, type],
+                ['\uffff', storeId, date, type]
+            ));
+            const hits = [];
+            req.onsuccess = () => {
+                const c = req.result;
+                if (c) { hits.push(c.value); c.continue(); }
+                else res(hits);
             };
             req.onerror = () => rej(req.error);
         });
@@ -957,8 +977,12 @@ const DataLayer = {
         }
     },
 
-     async submitJournal(journal) {
+       async submitJournal(journal) {
         if (CLOUD_MODE === 'local') return journal;
+
+        // Option B — strip opening_lines from header. Do NOT store the
+        // full opening file in Supabase. Per-line `opening` numbers still
+        // ride inside p_lines (needed for variance display).
         const { data, error } = await SB.rpc('submit_journal', {
             p_header: {
                 id: journal.id,
@@ -971,10 +995,23 @@ const DataLayer = {
                 by_name: journal.byName,
                 status: journal.status || 'Submitted',
                 audit_stage: journal.auditStage || 'awaiting_store',
-                opening_upload_ref: journal.openingUploadRef || null,
-                opening_lines: journal.openingLines || null
+                opening_upload_ref: null,
+                opening_lines: null
             },
-            p_lines: journal.lines
+            p_lines: journal.lines.map(l => ({
+                item_id: l.itemId,
+                uom: l.uom,
+                opening: l.opening,
+                purchases: 0,
+                transfers_in: 0,
+                transfers_out: 0,
+                consumption: l.consumption,
+                expected: l.expected,
+                physical: l.physical,
+                variance: l.variance,
+                mtd_purchases: 0,
+                mtd_consumption: l.mtdConsumption || 0
+            }))
         });
         if (error) throw error;
         return data;
@@ -4203,20 +4240,9 @@ async function submitCount(){
     j.status = 'Submitted';
     j.auditStage = 'awaiting_store';
     j.submittedAt = nowISO();
-    try {
+       try {
         if (CLOUD_MODE === 'supabase') {
-            // 1. Pull any staged sales for this store+date and commit it FIRST
-            const staged = await StagedFiles.find(u.id, j.storeId, j.date, 'sales');
-            for (const s of staged) {
-                try {
-                    await DataLayer.insertSalesUpload(s.payload.uploadRec, s.payload.ledgerRec);
-                    DB.salesUploads.push(s.payload.uploadRec);
-                    DB.consumptionLedger.push(s.payload.ledgerRec);
-                } catch(err) {
-                    console.warn('Sales commit failed for staged id ' + s.id, err);
-                }
-            }
-            // 2. Commit the journal itself
+            // Option B — only the journal + counted lines go to Supabase.
             await DataLayer.submitJournal(j);
             DB.journals.push(j);
         } else {
@@ -4227,11 +4253,8 @@ async function submitCount(){
         return;
     }
 
-    // 3. Wipe staged files for this store+date (only after success)
-    try {
-        await StagedFiles.deleteFor(u.id, j.storeId, j.date);
-    } catch(e) { console.warn('Staged cleanup failed', e); }
-
+    // Option B — KEEP staged sales + opening on this device so the
+    // same user can view them later. Do NOT delete StagedFiles here.
     saveData();
     const jId = j.id;
     window._workingCount = null;
@@ -4264,7 +4287,8 @@ function viewCount(id){
             </div>
         </div>` : '';
 
-    document.getElementById('modalBody').innerHTML = `
+        document.getElementById('modalBody').innerHTML = `
+        <div id="salesBanner"></div>
         <div class="journal-meta">
             <div><div class="k">Type</div><div class="v">SURPRISE AUDIT</div></div>
             <div><div class="k">Date</div><div class="v">${esc(j.date)}</div></div>
@@ -4298,6 +4322,26 @@ function viewCount(id){
         </tr></thead>
         <tbody id="viewCountBody"></tbody></table></div>
     `;
+        // Option B — try to load staged sales from this device
+    StagedFiles.findAnyOwner(j.storeId, j.date, 'sales').then(staged => {
+        const banner = document.getElementById('salesBanner');
+        if (!banner) return;
+        if (staged && staged.length > 0) {
+            const s = staged[0];
+            const payload = s.payload || {};
+            const up = payload.uploadRec || {};
+            banner.innerHTML = `
+                <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 12px;font-size:12.5px;color:#166534;margin-bottom:12px">
+                    ✅ <b>Sales file on this device:</b> ${esc(s.fileName || 'unknown')}
+                    · ${up.validRows || 0} valid rows · ${up.unitsSold || 0} units
+                </div>`;
+        } else {
+            banner.innerHTML = `
+                <div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;padding:10px 12px;font-size:12.5px;color:#92400e;margin-bottom:12px">
+                    ⚠ <b>Sales detail not on this device.</b> The counted lines below are from Supabase; the source sales file was uploaded from another browser.
+                </div>`;
+        }
+    }).catch(() => {});
 
     window._viewJournal = j;
     window._viewSort = { key: 'code', dir: 1 };
@@ -4676,8 +4720,7 @@ RENDERERS.reports = function(){
                 <tr><td>Employees Report</td><td><button class="btn-primary btn-sm" onclick="exportEmployeesCSV()">CSV</button></td></tr>
                 <tr><td>Stores Report</td><td><button class="btn-primary btn-sm" onclick="exportStoresCSV()">CSV</button></td></tr>
                 <tr><td>BOM Report</td><td><button class="btn-primary btn-sm" onclick="exportBOMCSV()">CSV</button></td></tr>
-                <tr><td>Sales Uploads Report</td><td><button class="btn-primary btn-sm" onclick="exportSalesCSV()">CSV</button></td></tr>
-                <tr><td>Exploded Consumption Report</td><td><button class="btn-primary btn-sm" onclick="exportExplodedCSV()">CSV</button></td></tr>
+                                <tr><td colspan="2" style="font-size:12px;color:#9ca3af;padding:8px 0">Sales file & exploded ledger are device-local in Option B — not exported from cloud.</td></tr>
                 <tr><td>Inventory Journals Report</td><td><button class="btn-primary btn-sm" onclick="exportJournalsCSV()">CSV</button></td></tr>
                              <tr><td>Surprise Check Variance Report</td><td><button class="btn-primary btn-sm" onclick="exportDailyVarianceCSV()">CSV</button></td></tr>
                 ${isAdmin() ? `<tr><td>Full Backup (JSON)</td><td><button class="btn-primary btn-sm" onclick="exportFullBackup()">Download</button></td></tr>` : ''}
