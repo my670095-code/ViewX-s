@@ -4179,6 +4179,7 @@ function cancelCount(){ if (!confirm('Discard?')) return; window._workingCount =
 async function submitCount(){
     const j = window._workingCount;
     if (!j) return;
+    const u = currentUser();
 
     // Only keep lines with explicit non-zero physical count
     const countedLines = j.lines.filter(l =>
