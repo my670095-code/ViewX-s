@@ -1706,27 +1706,37 @@ function sumMTDConsumption(storeId, itemId, journal){
    - Item list = union of (opening items) + (items consumed that day)
    - Physical starts blank (null), not zero
    ══════════════════════════════════════════════════════════════ */
-function buildCountLines(journal){
+/* ══════════════════════════════════════════════════════════════
+   Option B v2 — buildCountLines reads consumption from the STAGED
+   sales file (IndexedDB) instead of DB.consumptionLedger (empty).
+   ══════════════════════════════════════════════════════════════ */
+async function buildCountLines(journal){
     const storeId = journal.storeId;
     const auditDate = journal.date;
-    const openingLines = journal.openingLines || [];   // [{ itemId, qty, uom }]
+    const openingLines = journal.openingLines || [];
 
-    // Build a map: itemId -> opening qty (from this audit's opening upload)
+    // Opening map
     const openingMap = new Map();
     openingLines.forEach(l => {
         openingMap.set(l.itemId, { qty: Number(l.qty) || 0, uom: l.uom });
     });
 
-    // Sum consumption for that specific store + date
+    // ── Pull consumption from the STAGED sales file ──
     const consumptionMap = new Map();
-    DB.consumptionLedger.forEach(c => {
-        if (c.storeId !== storeId) return;
-        if (c.date !== auditDate) return;
-        c.lines.forEach(l => {
+    let stagedSales = [];
+    try {
+        stagedSales = await StagedFiles.findAnyOwner(storeId, auditDate, 'sales');
+    } catch(e) {
+        console.warn('buildCountLines: staged sales lookup failed', e);
+    }
+    for (const s of stagedSales) {
+        const ledger = s.payload?.ledgerRec;
+        if (!ledger || !Array.isArray(ledger.lines)) continue;
+        ledger.lines.forEach(l => {
             const prev = consumptionMap.get(l.itemId) || 0;
             consumptionMap.set(l.itemId, prev + (Number(l.qty) || 0));
         });
-    });
+    }
 
     // Union of both sets
     const allItemIds = new Set([...openingMap.keys(), ...consumptionMap.keys()]);
@@ -1750,7 +1760,7 @@ function buildCountLines(journal){
             transfersIn: 0, transfersOut: 0,
             consumption,
             expected,
-            physical: null,           // ← blank, not zero
+            physical: null,
             variance: 0,
             mtdPurchases: 0,
             mtdTransfersIn: 0, mtdTransfersOut: 0,
@@ -1761,7 +1771,6 @@ function buildCountLines(journal){
         });
     });
 
-    // Sort by item code for readability
     lines.sort((a, b) => {
         const ia = getItem(a.itemId), ib = getItem(b.itemId);
         return String(ia?.code || '').localeCompare(String(ib?.code || ''));
@@ -4087,7 +4096,7 @@ async function auditWizardStartCount(){
         showNoSalesGate(header);
         return;
     }
-    const result = buildCountLines(header);
+    const result = await buildCountLines(header);
     if (result.lines.length === 0) {
         toast('No items to count (no opening + no consumption).', 'error');
         return;
