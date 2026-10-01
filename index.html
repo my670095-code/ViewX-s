@@ -355,6 +355,90 @@ let XLSX_READY = false;
     s.onload = () => { XLSX_READY = true; };
     document.head.appendChild(s);
 })();
+    /* ══════════════════════════════════════════════════════════════
+   StagedFiles — IndexedDB scratchpad for opening + sales files
+   Files live here until the audit is submitted to Supabase.
+   ══════════════════════════════════════════════════════════════ */
+const StagedFiles = {
+    _db: null,
+    async open() {
+        if (this._db) return this._db;
+        this._db = await new Promise((res, rej) => {
+            const r = indexedDB.open('erp_staged', 1);
+            r.onupgradeneeded = e => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('files')) {
+                    const s = db.createObjectStore('files', { keyPath: 'id', autoIncrement: true });
+                    s.createIndex('by_owner', 'ownerId');
+                    s.createIndex('by_key', ['ownerId','storeId','date','type'], { unique: false });
+                }
+            };
+            r.onsuccess = () => res(r.result);
+            r.onerror = () => rej(r.error);
+        });
+        return this._db;
+    },
+    async put(entry) {
+        entry.parsedAt = Date.now();
+        const db = await this.open();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readwrite');
+            const req = tx.objectStore('files').put(entry);
+            req.onsuccess = () => res(req.result);
+            req.onerror = () => rej(req.error);
+        });
+    },
+    async find(ownerId, storeId, date, type) {
+        const db = await this.open();
+        return new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readonly');
+            const idx = tx.objectStore('files').index('by_key');
+            const req = idx.getAll([ownerId, storeId, date, type]);
+            req.onsuccess = () => res(req.result || []);
+            req.onerror = () => rej(req.error);
+        });
+    },
+    async deleteFor(ownerId, storeId, date) {
+        const db = await this.open();
+        const keys = await new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readwrite');
+            const idx = tx.objectStore('files').index('by_key');
+            const req = idx.openCursor(IDBKeyRange.bound(
+                [ownerId, storeId, date, ''],
+                [ownerId, storeId, date, '\uffff']
+            ));
+            const hits = [];
+            req.onsuccess = () => {
+                const c = req.result;
+                if (c) { hits.push(c.primaryKey); c.continue(); }
+                else res(hits);
+            };
+            req.onerror = () => rej(req.error);
+        });
+        await Promise.all(keys.map(k => new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readwrite');
+            const r = tx.objectStore('files').delete(k);
+            r.onsuccess = res; r.onerror = () => rej(r.error);
+        })));
+    },
+    async cleanupOnLogin(ownerId, maxAgeDays = 7) {
+        const db = await this.open();
+        const cutoff = Date.now() - maxAgeDays * 86400000;
+        await new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readwrite');
+            const store = tx.objectStore('files');
+            const req = store.openCursor();
+            req.onsuccess = () => {
+                const c = req.result;
+                if (!c) return res();
+                const v = c.value;
+                if (v.ownerId !== ownerId || (v.parsedAt || 0) < cutoff) c.delete();
+                c.continue();
+            };
+            req.onerror = () => rej(req.error);
+        });
+    }
+};
 
 const STORAGE_KEY = 'erp_inventory_data_v21';
 const SESSION_KEY = 'erp_inventory_session_v21';
@@ -1368,6 +1452,10 @@ async function bootApp(){
     document.getElementById('userName').textContent = u.name;
     document.getElementById('userRole').textContent = ROLE_LABEL[u.role] || u.role;
     document.getElementById('userAvatar').textContent = u.initials || '??';
+        // Clean staged files: remove other users' leftovers + anything >7 days old
+    try { await StagedFiles.cleanupOnLogin(u.id, 7); }
+    catch(e) { console.warn('Staged cleanup on login failed', e); }
+
     renderSidebar();
     showPage('dashboard');
 
@@ -3331,6 +3419,25 @@ RENDERERS.sales = function(){
     let rows = DB.salesUploads.filter(s => myStoreIds.has(s.storeId)).slice().reverse();
     const defaultDate = todayISO();
     setTimeout(() => { try { applySalesPrefill(); } catch(e){} }, 0);
+        // Build staged badge
+    window._stagedSalesCount = 0;
+    StagedFiles.find(u.id, '', '', 'sales').then(() => {}).catch(()=>{});
+    // (async populates below via microtask — see setTimeout)
+    setTimeout(async () => {
+        try {
+            const all = await new Promise(async (res) => {
+                const db = await StagedFiles.open();
+                const tx = db.transaction('files', 'readonly');
+                const req = tx.objectStore('files').index('by_owner').getAll(u.id);
+                req.onsuccess = () => res(req.result || []);
+                req.onerror = () => res([]);
+            });
+            const salesOnly = all.filter(x => x.type === 'sales');
+            window._stagedSalesCount = salesOnly.length;
+            const el = document.getElementById('stagedSalesBadge');
+            if (el) el.textContent = salesOnly.length ? `Staged: ${salesOnly.length}` : '';
+        } catch(e) {}
+    }, 0);
      return `
     <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
     <div class="info-block">
@@ -3362,7 +3469,8 @@ RENDERERS.sales = function(){
         </div>
     </div>` : ''}
     <div class="panel">
-        <div class="panel-header"><div class="panel-title">Sales Upload History</div>
+            <div class="panel-header"><div class="panel-title">Sales Upload History</div>
+        <span class="badge badge-orange" id="stagedSalesBadge"></span>
         <span class="badge badge-blue">${rows.length}</span></div>
         <div class="panel-body">
             ${rows.length === 0 ? '<div class="empty">No sales uploads yet</div>' : `
@@ -3415,6 +3523,18 @@ async function handleSalesUpload(evt){
     }
 
     const batchDate = (document.getElementById('salesBatchDate')?.value) || todayISO();
+        const u = currentUser();
+    // Warn once if user is re-uploading over a staged file for the same store+date
+    try {
+        const existing = await StagedFiles.find(u.id, selectedStoreId, batchDate, 'sales');
+        if (existing.length > 0) {
+            if (!confirm('A staged sales file already exists for this store and date. Replace it?')) {
+                evt.target.value = '';
+                return;
+            }
+            await StagedFiles.deleteFor(u.id, selectedStoreId, batchDate);
+        }
+    } catch(e) { console.warn('Staged check failed', e); }
     const monthTag = monthTagFromISO(batchDate);
     const reader = new FileReader();
     reader.onload = async function(e){
@@ -3527,14 +3647,20 @@ async function processSalesRows(rows, filename, tag){
             month: tag.monthTag,
             byId: u.id, byName: u.name, lines: ledgerLines, createdAt: nowISO()
         };
+             // ★ Stage locally — do NOT post to Supabase yet.
         try {
-            await DataLayer.insertSalesUpload(uploadRec, ledgerRec);
+            await StagedFiles.put({
+                ownerId: u.id,
+                storeId,
+                date: tag.batchDate,
+                type: 'sales',
+                fileName: filename,
+                payload: { uploadRec, ledgerRec }
+            });
         } catch(err) {
-            toast('Upload save failed: ' + (err.message || err), 'error');
+            toast('Local staging failed: ' + (err.message || err), 'error');
             return;
         }
-        DB.salesUploads.push(uploadRec);
-        DB.consumptionLedger.push(ledgerRec);
     }
     audit('UPLOAD','sales','',{ valid:parsed.length, rejects:rejects.length, totalUnits });
     saveData();
@@ -3930,6 +4056,19 @@ function auditWizardStartCount(){
 
     header.lines = result.lines;
     window._workingCount = header;
+        // Stage opening + carry sales payload for this audit
+    (async () => {
+        try {
+            await StagedFiles.put({
+                ownerId: u.id,
+                storeId: d.storeId,
+                date: d.date,
+                type: 'opening',
+                fileName: 'opening',
+                payload: { lines: header.openingLines }
+            });
+        } catch(e) { console.warn('Opening staging failed', e); }
+    })();
     _auditOpeningParsed = null;
     openCountSheet();
 }
@@ -4058,11 +4197,21 @@ async function submitCount(){
     j.status = 'Submitted';
     j.auditStage = 'awaiting_store';
     j.submittedAt = nowISO();
-
     try {
         if (CLOUD_MODE === 'supabase') {
+            // 1. Pull any staged sales for this store+date and commit it FIRST
+            const staged = await StagedFiles.find(u.id, j.storeId, j.date, 'sales');
+            for (const s of staged) {
+                try {
+                    await DataLayer.insertSalesUpload(s.payload.uploadRec, s.payload.ledgerRec);
+                    DB.salesUploads.push(s.payload.uploadRec);
+                    DB.consumptionLedger.push(s.payload.ledgerRec);
+                } catch(err) {
+                    console.warn('Sales commit failed for staged id ' + s.id, err);
+                }
+            }
+            // 2. Commit the journal itself
             await DataLayer.submitJournal(j);
-            // Mirror the submitted journal into local DB so the UI updates immediately
             DB.journals.push(j);
         } else {
             DB.journals.push(j);
@@ -4071,6 +4220,12 @@ async function submitCount(){
         toast('Submit failed: ' + (err.message || err), 'error');
         return;
     }
+
+    // 3. Wipe staged files for this store+date (only after success)
+    try {
+        await StagedFiles.deleteFor(u.id, j.storeId, j.date);
+    } catch(e) { console.warn('Staged cleanup failed', e); }
+
     saveData();
     const jId = j.id;
     window._workingCount = null;
