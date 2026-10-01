@@ -1571,8 +1571,7 @@ async function saveNewPassword(){
 const MENU_STRUCTURE = [
     { section:'Main' },
     { id:'dashboard', icon:'▦', label:'Dashboard' },
-     { section:'Inventory' },
-    { id:'sales', icon:'🛒', label:'Sales Upload' },
+         { section:'Inventory' },
    { id:'daily', icon:'◷', label:'Surprise Inv Check' },
     { section:'Master Data' },
     { id:'items', icon:'▤', label:'Item Master' },
@@ -3859,7 +3858,7 @@ function renderCountPage(){
         — open them below to add remarks and action plan.
     </div>` : ''}
 
-    <div class="toolbar">
+        <div class="toolbar">
         <select id="dailyStoreFilter" onchange="filterJournals()">
             <option value="">All Stores (in scope)</option>
             ${myStores.map(s => `<option value="${s.id}">${s.code} — ${esc(s.name)}</option>`).join('')}
@@ -3869,9 +3868,9 @@ function renderCountPage(){
             <option value="awaiting_store"${isStoreUser ? ' selected' : ''}>Awaiting ${isStoreUser ? 'My' : 'Store'} Response</option>
             <option value="acknowledged">Acknowledged</option>
         </select>
+        <button class="btn-light" onclick="showPage('sales')">📤 Upload Sales</button>
         ${canCreate ? `<button class="btn-primary" onclick="openAuditWizard()">+ New Surprise Audit</button>` : ''}
     </div>
-
     ${myStores.length === 0 && canCreate ? `<div class="warn-box">⚠ No stores in your scope yet.</div>` : ''}
 
     <div class="panel">
