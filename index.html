@@ -807,8 +807,11 @@ const DataLayer = {
                 actionPlan: j.action_plan || null,
                 actionPlanBy: j.action_plan_by || null,
                 actionPlanAt: j.action_plan_at || null,
-                lines: (journalLines.data || []).filter(l => l.journal_id === j.id).map(l => ({
-                    itemId: l.item_id, uom: l.uom,
+                             lines: (journalLines.data || []).filter(l => l.journal_id === j.id).map(l => ({
+                    itemId: l.item_id,
+                    itemCode: l.item_code || null,
+                    itemName: l.item_name || null,
+                    uom: l.uom,
                     opening: Number(l.opening),
                     purchases: 0, transfersIn: 0, transfersOut: 0,
                     consumption: Number(l.consumption),
@@ -1017,20 +1020,25 @@ const DataLayer = {
                 opening_upload_ref: null,
                 opening_lines: null
             },
-            p_lines: journal.lines.map(l => ({
-                item_id: l.itemId,
-                uom: l.uom,
-                opening: l.opening,
-                purchases: 0,
-                transfers_in: 0,
-                transfers_out: 0,
-                consumption: l.consumption,
-                expected: l.expected,
-                physical: l.physical,
-                variance: l.variance,
-                mtd_purchases: 0,
-                mtd_consumption: l.mtdConsumption || 0
-            }))
+                     p_lines: journal.lines.map(l => {
+                const it = getItem(l.itemId);
+                return {
+                    item_id: l.itemId,
+                    item_code: l.itemCode || (it ? it.code : null),
+                    item_name: l.itemName || (it ? it.name : null),
+                    uom: l.uom,
+                    opening: l.opening,
+                    purchases: 0,
+                    transfers_in: 0,
+                    transfers_out: 0,
+                    consumption: l.consumption,
+                    expected: l.expected,
+                    physical: l.physical,
+                    variance: l.variance,
+                    mtd_purchases: 0,
+                    mtd_consumption: l.mtdConsumption || 0
+                };
+            })
         });
         if (error) throw error;
         return data;
@@ -1777,8 +1785,10 @@ async function buildCountLines(journal){
         const expected = opening - consumption;
         const uom = openRec?.uom || item.uom;
 
-        lines.push({
+               lines.push({
             itemId,
+            itemCode: item.code,
+            itemName: item.name,
             uom,
             opening,
             purchases: 0,
@@ -3901,7 +3911,10 @@ function renderCountList(rows){
         <tbody>${rows.slice().reverse().map(j => {
             const stage = j.auditStage || j.audit_stage || 'submitted';
             const tv = j.lines.reduce((s,l) => s + (l.variance||0), 0);
-            const val = j.lines.reduce((s,l) => { const it = getItem(l.itemId); return s + ((l.variance||0) * (it?it.cost:0)); }, 0);
+                        const val = j.lines.reduce((s,l) => {
+                const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
+                return s + ((l.variance||0) * (it?it.cost:0));
+            }, 0);
             const stageBadge = stage === 'awaiting_store'
                 ? '<span class="badge badge-orange">Awaiting Store</span>'
                 : stage === 'acknowledged'
@@ -4451,13 +4464,13 @@ function openAcknowledgeSheet(id){
                 <th style="width:280px">Store Remark</th>
             </tr></thead>
             <tbody id="ackBody">
-                ${varianceLines.map((l, idx) => {
-                    const it = getItem(l.itemId);
+                           ${varianceLines.map((l, idx) => {
+                    const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
                     const v = l.variance || 0;
                     const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
                     return `<tr data-item-id="${l.itemId}">
-                        <td><b>${esc(it?.code || '?')}</b></td>
-                        <td>${esc(it?.name || 'Unknown')}</td>
+                        <td><b>${esc(it?.code || l.itemCode || '?')}</b></td>
+                        <td>${esc(it?.name || l.itemName || 'Unknown')}</td>
                         <td>${esc(l.uom)}</td>
                         <td style="text-align:right">${fmtNum(l.expected)}</td>
                         <td style="text-align:right">${fmtNum(l.physical)}</td>
@@ -4592,15 +4605,20 @@ function renderViewRows(){
     const showRemark = stage === 'acknowledged';
 
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
-let rows = j.lines.map(l => {
-    const it = getItem(l.itemId);
-    return {
-        code: it?it.code:'', name: it?it.name:'Unknown', uom: l.uom,
-        opening: l.opening, consumption: l.consumption,
-        expected: l.expected, physical: l.physical, variance: l.variance||0,
-        store_remark: l.storeRemark || l.store_remark || ''
-    };
-});
+    let rows = j.lines.map(l => {
+        const it = getItem(l.itemId);
+        return {
+            code: it ? it.code : (l.itemCode || ''),
+            name: it ? it.name : (l.itemName || 'Unknown'),
+            uom: l.uom,
+            opening: l.opening,
+            consumption: l.consumption,
+            expected: l.expected,
+            physical: l.physical,
+            variance: l.variance || 0,
+            store_remark: l.storeRemark || l.store_remark || ''
+        };
+    });
     if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
     const s = window._viewSort;
     rows.sort((a,b) => {
@@ -4618,7 +4636,7 @@ let rows = j.lines.map(l => {
             <td>${esc(r.name)}</td>
             <td>${esc(r.uom)}</td>
             <td style="text-align:right">${fmtNum(r.opening)}</td>
-            <td style="text-align:right;color:#ea580c">−${fmtNum(r.consumption)}</td>
+            <td style="text-align:right;color:#ea580c">${fmtNum(r.consumption)}</td>
             <td style="text-align:right"><b>${fmtNum(r.expected)}</b></td>
             <td style="text-align:right"><b>${fmtNum(r.physical)}</b></td>
             <td style="text-align:right" class="${vClass}">${v>0?'+':''}${fmtNum(v)}</td>
@@ -4641,15 +4659,20 @@ function exportViewExcel(id){
     if (!j) return;
     if (typeof XLSX === 'undefined') { toast('Excel library not ready', 'error'); return; }
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
-  let rows = j.lines.map(l => {
-    const it = getItem(l.itemId);
-    return {
-        code: it?it.code:'', name: it?it.name:'Unknown', uom: l.uom,
-        opening: l.opening, consumption: l.consumption,
-        expected: l.expected, physical: l.physical, variance: l.variance||0,
-        store_remark: l.storeRemark || l.store_remark || ''
-    };
-});
+    let rows = j.lines.map(l => {
+        const it = getItem(l.itemId);
+        return {
+            code: it ? it.code : (l.itemCode || ''),
+            name: it ? it.name : (l.itemName || 'Unknown'),
+            uom: l.uom,
+            opening: l.opening,
+            consumption: l.consumption,
+            expected: l.expected,
+            physical: l.physical,
+            variance: l.variance || 0,
+            store_remark: l.storeRemark || l.store_remark || ''
+        };
+    });
     if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
     const s = window._viewSort || { key:'code', dir:1 };
     rows.sort((a,b) => {
@@ -4757,9 +4780,9 @@ function exportJournalsCSV(){
     const rows = DB.journals.filter(j => myStoreIds.has(j.storeId));
     if (rows.length === 0) { toast('Nothing','error'); return; }
     const out = [['Journal','Date','Month','Store','Item Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','By','Status']];
-    rows.forEach(j => j.lines.forEach(l => {
-        const it = getItem(l.itemId);
-        out.push([j.id, j.date, j.month||'', storeLabel(j.storeId), it?it.code:'', it?it.name:'', l.uom, l.opening, l.consumption, l.expected, l.physical, l.variance, j.byName, j.status]);
+     rows.forEach(j => j.lines.forEach(l => {
+        const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
+        out.push([j.id, j.date, j.month||'', storeLabel(j.storeId), it?it.code:(l.itemCode||''), it?it.name:(l.itemName||''), l.uom, l.opening, l.consumption, l.expected, l.physical, l.variance, j.byName, j.status]);
     }));
     downloadCSV(out, 'inventory_journals.csv');
 }
@@ -4769,7 +4792,7 @@ function exportDailyVarianceCSV(){
     if (rows.length === 0) { toast('Nothing','error'); return; }
        const out = [['Audit No','Date','Store','Stage','Item Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','Value Impact','Store Remark','Action Plan','Created By','Acknowledged By']];
     rows.forEach(j => j.lines.forEach(l => {
-        const it = getItem(l.itemId);
+            const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
         const valueImpact = (l.variance||0) * (it ? it.cost : 0);
         const stage = j.auditStage || j.audit_stage || 'submitted';
         out.push([
