@@ -378,9 +378,28 @@ const StagedFiles = {
         });
         return this._db;
     },
-    async put(entry) {
+       async put(entry) {
         entry.parsedAt = Date.now();
         const db = await this.open();
+
+        // First: delete any existing entry with the same (owner, store, date, type)
+        // so we never accumulate duplicates for the same upload slot.
+        await new Promise((res, rej) => {
+            const tx = db.transaction('files', 'readwrite');
+            const idx = tx.objectStore('files').index('by_key');
+            const range = IDBKeyRange.only([
+                entry.ownerId, entry.storeId, entry.date, entry.type
+            ]);
+            const req = idx.openCursor(range);
+            req.onsuccess = () => {
+                const c = req.result;
+                if (c) { c.delete(); c.continue(); }
+                else res();
+            };
+            req.onerror = () => rej(req.error);
+        });
+
+        // Then: insert the new entry
         return new Promise((res, rej) => {
             const tx = db.transaction('files', 'readwrite');
             const req = tx.objectStore('files').put(entry);
@@ -1728,6 +1747,12 @@ async function buildCountLines(journal){
         stagedSales = await StagedFiles.findAnyOwner(storeId, auditDate, 'sales');
     } catch(e) {
         console.warn('buildCountLines: staged sales lookup failed', e);
+    }
+        console.log('[buildCountLines] storeId=', storeId, 'date=', auditDate,
+                'staged entries:', stagedSales.length);
+    // Safety: only use the most recent staged entry so duplicates never accumulate
+    if (stagedSales.length > 1) {
+        stagedSales = [stagedSales[stagedSales.length - 1]];
     }
     for (const s of stagedSales) {
         const ledger = s.payload?.ledgerRec;
@@ -3607,10 +3632,24 @@ async function processSalesRows(rows, filename, tag){
     if (!forcedStore) { toast('Selected store not found.', 'error'); return; }
     if (!myStoreIds.has(forcedStore.id)) { toast('Selected store is out of your scope.', 'error'); return; }
 
-    rows.forEach((row, i) => {
+       rows.forEach((row, i) => {
         const lineNo = i + 2;
-        const storeCode = String(pick(row, H.storeCode) || '').trim();   // informational only
+
+        // ── Skip non-product categories and modifier SKUs ──
+        // Only real products (that have a BOM) should be exploded.
+        const catRaw = String(pick(row, ['invd_category','category']) || '').trim();
+        if (catRaw === '94' || catRaw === '152' || catRaw === '115' || catRaw === '0') {
+            tag._categorySkipped = (tag._categorySkipped || 0) + 1;
+            return;
+        }
+
         const productId = String(pick(row, H.productId) || '').trim();
+        if (/^800/.test(productId)) {
+            tag._modifierSkipped = (tag._modifierSkipped || 0) + 1;
+            return;
+        }
+
+        const storeCode = String(pick(row, H.storeCode) || '').trim();   // informational only
         const qtyRaw    = pick(row, H.qty);
         if (!productId && qtyRaw === '') return;
         if (!productId) { rejects.push(`Row ${lineNo}: missing Product ID`); return; }
@@ -3621,6 +3660,12 @@ async function processSalesRows(rows, filename, tag){
 
         const bom = getBOMByProductId(productId);
         if (!bom) { rejects.push(`Row ${lineNo}: No BOM for Product ID "${productId}"`); return; }
+                // ★ Skip modifier SKUs — they are already exploded ingredient counts from the POS
+        //    and would be double-counted if run through the BOM again.
+        if (/^800/.test(productId)) {
+            tag._modifierSkipped = (tag._modifierSkipped || 0) + 1;
+            return;
+        }
         const qty = Number(qtyRaw);
         if (isNaN(qty) || qty <= 0) { rejects.push(`Row ${lineNo}: invalid Qty "${qtyRaw}"`); return; }
 
@@ -3703,8 +3748,13 @@ async function processSalesRows(rows, filename, tag){
     }
     audit('UPLOAD','sales','',{ valid:parsed.length, rejects:rejects.length, totalUnits });
     saveData();
-    const toastMsg = `Uploaded ${parsed.length} row(s), ${totalUnits} units` + (rejects.length > 0 ? `, ${rejects.length} rejected` : '');
-    if (rejects.length > 0) {
+        const catSkipped = tag._categorySkipped || 0;
+    const modSkipped = tag._modifierSkipped || 0;
+    const nonProductSkipped = catSkipped + modSkipped;
+    const toastMsg =
+        `Uploaded ${parsed.length} row(s), ${totalUnits} units` +
+        (nonProductSkipped > 0 ? `, ${nonProductSkipped} non-product rows skipped` : '') +
+        (rejects.length > 0 ? `, ${rejects.length} rejected` : '');
         openModal('Upload Completed with Rejections', `
             <p style="font-size:13px;color:#6b7280;margin-bottom:12px">File: <b>${esc(filename)}</b></p>
             <div class="reject-list">${rejects.map(r => `<div>${esc(r)}</div>`).join('')}</div>
