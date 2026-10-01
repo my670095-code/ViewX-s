@@ -1779,12 +1779,6 @@ function editBtn(entityType, id, handlerName){
 }
 
 /* ---------- SALES-DATA GATE (daily only) ---------- */
-function findSalesUploadForJournal(journal){
-    return DB.salesUploads.find(s =>
-        s.storeId === journal.storeId &&
-        s.date === journal.date
-    );
-}
 let _salesPrefill = null;
 function goToSalesUploadWithPrefill(prefill){
     _salesPrefill = prefill;
@@ -1817,7 +1811,7 @@ RENDERERS.dashboard = function(){
     <div class="cards">
         <div class="card"><div class="card-label">Storage</div><div class="card-value">${sizeKB} KB</div></div>
         <div class="card"><div class="card-label">Journals</div><div class="card-value">${DB.journals.length}</div></div>
-        <div class="card"><div class="card-label">Sales Uploads</div><div class="card-value">${DB.salesUploads.length}</div></div>
+                <div class="card"><div class="card-label">Employees</div><div class="card-value">${DB.employees.length}</div></div>
         <div class="card"><div class="card-label">BOMs</div><div class="card-value">${DB.bom.length}</div></div>
     </div>
     ${DB.stores.length === 0 ? `
@@ -3458,7 +3452,6 @@ RENDERERS.sales = function(){
     setTimeout(() => { try { applySalesPrefill(); } catch(e){} }, 0);
         // Build staged badge
     window._stagedSalesCount = 0;
-    StagedFiles.find(u.id, '', '', 'sales').then(() => {}).catch(()=>{});
     // (async populates below via microtask — see setTimeout)
     setTimeout(async () => {
         try {
@@ -3856,7 +3849,6 @@ function renderCountList(rows){
                     : '<span class="badge badge-blue">Submitted</span>';
 
             const canRespond = isStoreUser && stage === 'awaiting_store';
-            const canViewOnly = !canRespond;
 
             return `<tr>
                 <td><b>${esc(j.id)}</b></td>
@@ -3921,7 +3913,7 @@ function openAuditWizard(){
     `);
 }
 
-function auditWizardStep2(){
+async function auditWizardStep2(){
     const date = document.getElementById('wizDate').value;
     const storeId = document.getElementById('wizStore').value;
     const u = currentUser();
@@ -3947,15 +3939,20 @@ function auditWizardStep2(){
     window._auditDraft.date = date;
     window._auditDraft.storeId = storeId;
 
-    // Check sales upload exists for this store + date
-    const sales = DB.salesUploads.find(s => s.storeId === storeId && s.date === date);
+        // Check staged sales in IndexedDB (Option B)
+    let stagedSales = [];
+    try {
+        stagedSales = await StagedFiles.find(u.id, storeId, date, 'sales');
+    } catch(e) {
+        console.warn('Staged sales lookup failed', e);
+    }
+    const salesFound = stagedSales.length > 0;
 
     openModal('New Surprise Audit — Step 2 of 2', `
         <div class="info-block">
             <b>Step 2:</b> Upload the <b>Opening Stock file</b> for this audit.
-            ${sales ? '✅ Sales data found for this date.' : '⚠ No sales upload for this date yet — you can still continue, or upload sales first.'}
+            ${salesFound ? '✅ Sales file staged on this device.' : '⚠ No sales file staged yet — you can still upload opening, but the check sheet will block until sales is staged.'}
         </div>
-
         <div class="form-row" style="margin-top:18px">
             <label>Opening Stock File (SKU + Counted)</label>
             <div class="upload-drop" onclick="document.getElementById('auditOpeningFile').click()" style="padding:24px 20px">
@@ -4634,7 +4631,7 @@ RENDERERS.reports = function(){
     <div class="scope-banner"><b>Scope:</b> ${esc(scopeLabel(u))}</div>
     <div class="cards">
         <div class="card"><div class="card-label">Journals</div><div class="card-value">${DB.journals.filter(j=>myStoreIds.has(j.storeId)).length}</div></div>
-        <div class="card"><div class="card-label">Sales Uploads</div><div class="card-value green">${DB.salesUploads.filter(s=>myStoreIds.has(s.storeId)).length}</div></div>
+                <div class="card"><div class="card-label">Pending Audits</div><div class="card-value orange">${DB.journals.filter(j => myStoreIds.has(j.storeId) && (j.auditStage || j.audit_stage) === 'awaiting_store').length}</div></div>
         <div class="card"><div class="card-label">Items</div><div class="card-value">${DB.items.length}</div></div>
         <div class="card"><div class="card-label">Stores</div><div class="card-value">${myStoreIds.size}</div></div>
     </div>
@@ -4802,7 +4799,7 @@ RENDERERS.backup = function(){
         <div class="card"><div class="card-label">Storage</div><div class="card-value">${sizeKB} KB</div></div>
         <div class="card"><div class="card-label">Journals</div><div class="card-value">${DB.journals.length}</div></div>
         <div class="card"><div class="card-label">Sales Uploads</div><div class="card-value">${DB.salesUploads.length}</div></div>
-        <div class="card"><div class="card-label">Openings</div><div class="card-value">${DB.openingStock.length}</div></div>
+                <div class="card"><div class="card-label">BOMs</div><div class="card-value">${DB.bom.length}</div></div>
     </div>
     <div class="panel">
         <div class="panel-header"><div class="panel-title">Backup</div></div>
