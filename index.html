@@ -3499,7 +3499,7 @@ RENDERERS.sales = function(){
             const salesOnly = all.filter(x => x.type === 'sales');
             window._stagedSalesCount = salesOnly.length;
             const el = document.getElementById('stagedSalesBadge');
-            if (el) el.textContent = salesOnly.length ? `Staged: ${salesOnly.length}` : '';
+            if (el) el.textContent = salesOnly.length ? ('Staged: ' + salesOnly.length) : '';
         } catch(e) {}
     }, 0);
      return `
