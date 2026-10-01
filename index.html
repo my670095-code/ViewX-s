@@ -1115,12 +1115,13 @@ const DataLayer = {
                 actionPlan: j.action_plan || null,
                 actionPlanBy: j.action_plan_by || null,
                 actionPlanAt: j.action_plan_at || null,
-                             lines: (journalLines.data || []).filter(l => l.journal_id === j.id).map(l => ({
+                                                lines: (journalLines.data || []).filter(l => l.journal_id === j.id).map(l => ({
                     itemId: l.item_id,
                     itemCode: l.item_code || null,
                     itemName: l.item_name || null,
                     uom: l.uom,
                     opening: Number(l.opening),
+                    received: Number(l.received) || 0,
                     purchases: 0, transfersIn: 0, transfersOut: 0,
                     consumption: Number(l.consumption),
                     expected: Number(l.expected),
@@ -1328,7 +1329,7 @@ const DataLayer = {
                 opening_upload_ref: null,
                 opening_lines: null
             },
-                     p_lines: journal.lines.map(l => {
+                        p_lines: journal.lines.map(l => {
                 const it = getItem(l.itemId);
                 return {
                     item_id: l.itemId,
@@ -1336,6 +1337,7 @@ const DataLayer = {
                     item_name: l.itemName || (it ? it.name : null),
                     uom: l.uom,
                     opening: l.opening,
+                    received: Number(l.received) || 0,
                     purchases: 0,
                     transfers_in: 0,
                     transfers_out: 0,
@@ -1976,7 +1978,7 @@ function badge(status){
         'Warehouse':'orange','Viewer':'gray','Void':'gray','Pending':'orange','Rejected':'red',
         'In Progress':'orange','Review':'orange','Draft':'orange','Surplus':'green','Loss':'red',
 'Scheduled':'blue','Under Review':'blue','Critical':'red','Inactive':'gray','Locked':'orange',
-'Awaiting Store':'orange','Acknowledged':'green'
+'Awaiting Receiving':'purple','Awaiting Store':'orange','Acknowledged':'green'
     };
     return `<span class="badge badge-${map[status]||'gray'}">${esc(status)}</span>`;
 }
@@ -2092,12 +2094,13 @@ async function buildCountLines(journal){
         const expected = opening - consumption;
         const uom = openRec?.uom || item.uom;
 
-               lines.push({
+            lines.push({
             itemId,
             itemCode: item.code,
             itemName: item.name,
             uom,
             opening,
+            received: 0,
             purchases: 0,
             transfersIn: 0, transfersOut: 0,
             consumption,
@@ -4221,17 +4224,22 @@ function renderCountList(rows){
         <tbody>${rows.slice().reverse().map(j => {
             const stage = j.auditStage || j.audit_stage || 'submitted';
             const tv = j.lines.reduce((s,l) => s + (l.variance||0), 0);
-                        const val = j.lines.reduce((s,l) => {
+            const val = j.lines.reduce((s,l) => {
                 const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
                 return s + ((l.variance||0) * (it?it.cost:0));
             }, 0);
-            const stageBadge = stage === 'awaiting_store'
-                ? '<span class="badge badge-orange">Awaiting Store</span>'
-                : stage === 'acknowledged'
-                    ? '<span class="badge badge-green">Acknowledged</span>'
-                    : '<span class="badge badge-blue">Submitted</span>';
+            const stageBadge =
+                stage === 'awaiting_receiving'
+                    ? '<span class="badge badge-purple">Awaiting Receiving</span>'
+                    : stage === 'awaiting_store'
+                        ? '<span class="badge badge-orange">Awaiting Store</span>'
+                        : stage === 'acknowledged'
+                            ? '<span class="badge badge-green">Acknowledged</span>'
+                            : '<span class="badge badge-blue">Submitted</span>';
 
             const canRespond = isStoreUser && stage === 'awaiting_store';
+            const canReceive = !isStoreUser && stage === 'awaiting_receiving'
+                               && ['admin','opmanager','area'].includes(u.role);
 
             return `<tr>
                 <td><b>${esc(j.id)}</b></td>
@@ -4243,6 +4251,7 @@ function renderCountList(rows){
                 <td>${esc(j.byName)}</td>
                 <td>${stageBadge}</td>
                 <td class="actions-cell">
+                    ${canReceive ? `<button class="btn-warn btn-xs" onclick="openReceivingSheet('${j.id}')">Add Receiving</button>` : ''}
                     ${canRespond
                         ? `<button class="btn-warn btn-xs" onclick="openAcknowledgeSheet('${j.id}')">Respond</button>`
                         : `<button class="btn-light btn-xs" onclick="viewCount('${j.id}')">View</button>`}
@@ -4618,7 +4627,7 @@ async function submitCount(){
 
     j.lines = countedLines;
     j.status = 'Submitted';
-    j.auditStage = 'awaiting_store';
+    j.auditStage = 'awaiting_receiving';
     j.submittedAt = nowISO();
        try {
         if (CLOUD_MODE === 'supabase') {
@@ -4694,6 +4703,7 @@ function viewCount(id){
             <th>Item</th>
             <th>UOM</th>
             <th style="text-align:right">Opening</th>
+            <th style="text-align:right">Received</th>
             <th style="text-align:right">Consum</th>
             <th style="text-align:right">Expected</th>
             <th style="text-align:right">Physical</th>
@@ -4731,6 +4741,231 @@ function viewCount(id){
     document.getElementById('modalOverlay').classList.add('show');
 }
     /* ══════════════════════════════════════════════════════════════
+   RECEIVING ENTRY — AM / OM / Admin adds received qty per line
+   Stage: awaiting_receiving → awaiting_store on Resubmit
+   Formula: Expected = Opening + Received − Consumption
+   ══════════════════════════════════════════════════════════════ */
+function openReceivingSheet(id){
+    const u = currentUser();
+    if (!['admin','opmanager','area'].includes(u.role)) {
+        toast('Only AM / OM / Admin can enter receiving.', 'error');
+        return;
+    }
+    const j = DB.journals.find(x => x.id === id);
+    if (!j) { toast('Audit not found.', 'error'); return; }
+    const stage = j.auditStage || j.audit_stage || 'submitted';
+    if (stage !== 'awaiting_receiving') {
+        toast('Receiving already submitted for this audit.', 'error');
+        return;
+    }
+    if (!isInScope(j.storeId, u)) { toast('Out of scope.', 'error'); return; }
+
+    window._receivingJournal = JSON.parse(JSON.stringify(j));   // deep copy so Cancel discards changes
+
+    const modalBox = document.getElementById('modalBox');
+    modalBox.className = 'modal modal-xl';
+
+    document.getElementById('modalTitle').innerHTML =
+        `Add Receiving <span style="color:#2563eb">${esc(j.id)}</span> ` +
+        `<span class="badge badge-purple" style="margin-left:8px">Awaiting Receiving</span> ` +
+        `<span style="font-size:12px;color:#6b7280;margin-left:8px">${esc(j.date)}</span>`;
+
+    document.getElementById('modalBody').innerHTML = `
+        <div class="journal-meta">
+            <div><div class="k">Type</div><div class="v">SURPRISE AUDIT</div></div>
+            <div><div class="k">Date</div><div class="v">${esc(j.date)}</div></div>
+            <div><div class="k">Store</div><div class="v">${esc(storeLabel(j.storeId))}</div></div>
+            <div><div class="k">Month</div><div class="v">${esc(j.month || '—')}</div></div>
+        </div>
+
+        <div class="info-block">
+            Enter the quantity <b>received</b> for each counted item.
+            <br><b>Expected = Opening + Received − Consumption</b> · <b>Variance = Physical − Expected</b>
+            <br>Leave blank if nothing was received. Click <b>Resubmit</b> when done — this forwards the audit to the store.
+        </div>
+
+        <div class="journal-toolbar">
+            <div class="journal-progress">Entered <b id="rEntered">0</b> / ${j.lines.length}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <input type="text" class="journal-search" id="rSearch" placeholder="Search code or item..." oninput="filterReceivingRows()">
+                <input type="number" step="0.01" id="rBulkVal" placeholder="Set all = 0" style="width:120px" title="Set all visible rows to this value">
+                <button class="btn-light btn-sm" onclick="bulkSetReceiving()">Apply to all</button>
+            </div>
+        </div>
+
+        <div class="journal-table-wrap"><table id="receivingTable"><thead><tr>
+            <th>Code</th>
+            <th>Item</th>
+            <th>UOM</th>
+            <th style="text-align:right">Opening</th>
+            <th style="text-align:right">Consum</th>
+            <th style="text-align:right">Expected</th>
+            <th style="text-align:right">Physical</th>
+            <th style="text-align:right;color:#7c3aed">Received</th>
+            <th style="text-align:right">Variance</th>
+        </tr></thead>
+        <tbody id="receivingBody"></tbody></table></div>
+    `;
+
+    document.getElementById('modalFooter').innerHTML = `
+        <div style="flex:1;font-size:12px;color:#6b7280;align-self:center">
+            <b id="rEnteredFoot">0</b> of ${j.lines.length} items
+        </div>
+        <button class="btn-light" onclick="closeReceivingSheet()">Cancel</button>
+        <button class="btn-success" onclick="submitReceiving()">Resubmit →</button>`;
+
+    document.getElementById('modalOverlay').classList.add('show');
+    window._receivingSort = { key: 'varianceAbs', dir: -1 };  // biggest variance first
+    renderReceivingRows();
+    updateReceivingProgress();
+}
+
+function closeReceivingSheet(){
+    if (!confirm('Discard receiving changes?')) return;
+    window._receivingJournal = null;
+    closeModal();
+}
+
+function renderReceivingRows(){
+    const j = window._receivingJournal;
+    if (!j) return;
+
+    const q = (document.getElementById('rSearch')?.value || '').toLowerCase().trim();
+    let rows = j.lines.map((l, idx) => {
+        const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
+        return {
+            idx,
+            code: it ? it.code : (l.itemCode || ''),
+            name: it ? it.name : (l.itemName || 'Unknown'),
+            uom: l.uom,
+            opening: Number(l.opening) || 0,
+            consumption: Number(l.consumption) || 0,
+            received: Number(l.received) || 0,
+            expected: Number(l.expected) || 0,
+            physical: Number(l.physical) || 0,
+            variance: Number(l.variance) || 0
+        };
+    });
+
+    if (q) rows = rows.filter(r => r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
+
+    const s = window._receivingSort;
+    rows.sort((a,b) => {
+        if (s.key === 'varianceAbs') return (Math.abs(a.variance) - Math.abs(b.variance)) * s.dir;
+        if (s.key === 'variance')    return (a.variance - b.variance) * s.dir;
+        return String(a[s.key]).localeCompare(String(b[s.key])) * s.dir;
+    });
+
+    document.getElementById('receivingBody').innerHTML = rows.map(r => {
+        const v = r.variance;
+        const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
+        return `<tr data-idx="${r.idx}">
+            <td><b>${esc(r.code)}</b></td>
+            <td>${esc(r.name)}</td>
+            <td>${esc(r.uom)}</td>
+            <td style="text-align:right">${fmtNum(r.opening)}</td>
+            <td style="text-align:right;color:#ea580c">${fmtNum(r.consumption)}</td>
+            <td style="text-align:right"><b data-expected>${fmtNum(r.expected)}</b></td>
+            <td style="text-align:right">${fmtNum(r.physical)}</td>
+            <td style="text-align:right">
+                <input type="number" step="0.01" value="${r.received || ''}" placeholder="0"
+                       oninput="updateReceivingLine(${r.idx}, this.value)" style="width:100px">
+            </td>
+            <td style="text-align:right" class="${vClass}" data-variance>${v>0?'+':''}${fmtNum(v)}</td>
+        </tr>`;
+    }).join('') || '<tr><td colspan="9" style="text-align:center;padding:24px;color:#9ca3af">No items match</td></tr>';
+}
+
+function updateReceivingLine(idx, value){
+    const j = window._receivingJournal;
+    if (!j) return;
+    const line = j.lines[idx];
+    if (!line) return;
+
+    const received = value === '' ? 0 : Number(value) || 0;
+    line.received = received;
+    line.expected = (Number(line.opening) || 0) + received - (Number(line.consumption) || 0);
+    line.variance = (Number(line.physical) || 0) - line.expected;
+
+    const tr = document.querySelector(`#receivingBody tr[data-idx="${idx}"]`);
+    if (tr) {
+        const eCell = tr.querySelector('[data-expected]');
+        const vCell = tr.querySelector('[data-variance]');
+        if (eCell) eCell.textContent = fmtNum(line.expected);
+        if (vCell) {
+            const v = line.variance;
+            vCell.textContent = (v>0?'+':'') + fmtNum(v);
+            vCell.className = v > 0 ? 'red' : v < 0 ? 'green' : '';
+            vCell.style.textAlign = 'right';
+        }
+    }
+    updateReceivingProgress();
+}
+
+function updateReceivingProgress(){
+    const j = window._receivingJournal;
+    if (!j) return;
+    const entered = j.lines.filter(l => Number(l.received) > 0).length;
+    const a = document.getElementById('rEntered');
+    const b = document.getElementById('rEnteredFoot');
+    if (a) a.textContent = entered;
+    if (b) b.textContent = entered;
+}
+
+function filterReceivingRows(){ renderReceivingRows(); }
+
+function bulkSetReceiving(){
+    const el = document.getElementById('rBulkVal');
+    if (!el) return;
+    const val = Number(el.value);
+    if (isNaN(val)) { toast('Enter a number', 'error'); return; }
+    const j = window._receivingJournal;
+    if (!j) return;
+    j.lines.forEach(l => {
+        l.received = val;
+        l.expected = (Number(l.opening) || 0) + val - (Number(l.consumption) || 0);
+        l.variance = (Number(l.physical) || 0) - l.expected;
+    });
+    renderReceivingRows();
+    updateReceivingProgress();
+    toast(`Set Received = ${val} on all lines`, 'success');
+}
+
+async function submitReceiving(){
+    const j = window._receivingJournal;
+    if (!j) return;
+    const u = currentUser();
+
+    j.auditStage = 'awaiting_store';
+    j.audit_stage = 'awaiting_store';
+
+    // Recompute in case any line wasn't touched
+    j.lines.forEach(l => {
+        l.received = Number(l.received) || 0;
+        l.expected = (Number(l.opening) || 0) + l.received - (Number(l.consumption) || 0);
+        l.variance = (Number(l.physical) || 0) - l.expected;
+    });
+
+    try {
+        if (CLOUD_MODE === 'supabase') {
+            await DataLayer.submitJournal(j);
+        }
+    } catch(err) {
+        toast('Resubmit failed: ' + (err.message || err), 'error');
+        return;
+    }
+
+    // Merge back into in-memory DB
+    const idx = DB.journals.findIndex(x => x.id === j.id);
+    if (idx >= 0) DB.journals[idx] = j;
+    else DB.journals.push(j);
+
+    window._receivingJournal = null;
+    closeModal();
+    toast(`Audit ${j.id} sent to store — awaiting response`, 'success');
+    showPage('daily');
+}
+    /* ══════════════════════════════════════════════════════════════
    STORE ACKNOWLEDGMENT FLOW
    ══════════════════════════════════════════════════════════════ */
 
@@ -4766,8 +5001,11 @@ function openAcknowledgeSheet(id){
             <div class="info-block">
                 <b>${varianceLines.length}</b> item(s) with variance. Add a remark for each and submit with an action plan.
             </div>
-            <div class="journal-table-wrap"><table><thead><tr>
+                        <div class="journal-table-wrap"><table><thead><tr>
                 <th>Code</th><th>Item</th><th>UOM</th>
+                <th style="text-align:right">Opening</th>
+                <th style="text-align:right">Received</th>
+                <th style="text-align:right">Consum</th>
                 <th style="text-align:right">Expected</th>
                 <th style="text-align:right">Physical</th>
                 <th style="text-align:right">Variance</th>
@@ -4778,10 +5016,13 @@ function openAcknowledgeSheet(id){
                     const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
                     const v = l.variance || 0;
                     const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
-                    return `<tr data-item-id="${l.itemId}">
+                                 return `<tr data-item-id="${l.itemId}">
                         <td><b>${esc(it?.code || l.itemCode || '?')}</b></td>
                         <td>${esc(it?.name || l.itemName || 'Unknown')}</td>
                         <td>${esc(l.uom)}</td>
+                        <td style="text-align:right">${fmtNum(l.opening)}</td>
+                        <td style="text-align:right;color:#7c3aed">${fmtNum(l.received || 0)}</td>
+                        <td style="text-align:right;color:#ea580c">${fmtNum(l.consumption)}</td>
                         <td style="text-align:right">${fmtNum(l.expected)}</td>
                         <td style="text-align:right">${fmtNum(l.physical)}</td>
                         <td style="text-align:right" class="${vClass}"><b>${v>0?'+':''}${fmtNum(v)}</b></td>
@@ -4908,7 +5149,7 @@ async function submitAcknowledgment(){
     toast('Audit acknowledged successfully.', 'success');
     showPage('daily');
 }
-function renderViewRows(){
+    function renderViewRows(){
     const j = window._viewJournal;
     if (!j) return;
     const stage = j.auditStage || j.audit_stage || 'submitted';
@@ -4922,6 +5163,7 @@ function renderViewRows(){
             name: it ? it.name : (l.itemName || 'Unknown'),
             uom: l.uom,
             opening: l.opening,
+            received: l.received || 0,
             consumption: l.consumption,
             expected: l.expected,
             physical: l.physical,
@@ -4936,7 +5178,7 @@ function renderViewRows(){
         return String(a[s.key]).localeCompare(String(b[s.key])) * s.dir;
     });
 
-    const colspan = showRemark ? 9 : 8;
+    const colspan = showRemark ? 10 : 9;
 
     document.getElementById('viewCountBody').innerHTML = rows.map(r => {
         const v = r.variance;
@@ -4946,6 +5188,7 @@ function renderViewRows(){
             <td>${esc(r.name)}</td>
             <td>${esc(r.uom)}</td>
             <td style="text-align:right">${fmtNum(r.opening)}</td>
+            <td style="text-align:right;color:#7c3aed">${fmtNum(r.received)}</td>
             <td style="text-align:right;color:#ea580c">${fmtNum(r.consumption)}</td>
             <td style="text-align:right"><b>${fmtNum(r.expected)}</b></td>
             <td style="text-align:right"><b>${fmtNum(r.physical)}</b></td>
@@ -4976,6 +5219,7 @@ function exportViewExcel(id){
             name: it ? it.name : (l.itemName || 'Unknown'),
             uom: l.uom,
             opening: l.opening,
+            received: l.received || 0,
             consumption: l.consumption,
             expected: l.expected,
             physical: l.physical,
@@ -5002,14 +5246,14 @@ function exportViewExcel(id){
         ['Action Plan', j.actionPlan || ''],
         ['Acknowledged By', j.acknowledgedByName || ''],
         [],
-        ['Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','Store Remark']
+         ['Code','Item','UOM','Opening','Received','Consumption','Expected','Physical','Variance','Store Remark']
     ];
     rows.forEach(r => aoa.push([
-        r.code, r.name, r.uom, r.opening, r.consumption,
+        r.code, r.name, r.uom, r.opening, r.received, r.consumption,
         r.expected, r.physical, r.variance, r.store_remark || ''
     ]));
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{wch:14},{wch:32},{wch:8},{wch:10},{wch:12},{wch:10},{wch:10},{wch:10}];
+        ws['!cols'] = [{wch:14},{wch:32},{wch:8},{wch:10},{wch:10},{wch:12},{wch:10},{wch:10},{wch:10},{wch:32}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Journal');
   XLSX.writeFile(wb, `${j.id}_surprise_${j.date}.xlsx`);
@@ -5089,10 +5333,10 @@ function exportJournalsCSV(){
     const myStoreIds = new Set(getMyStores());
     const rows = DB.journals.filter(j => myStoreIds.has(j.storeId));
     if (rows.length === 0) { toast('Nothing','error'); return; }
-    const out = [['Journal','Date','Month','Store','Item Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','By','Status']];
+      const out = [['Journal','Date','Month','Store','Item Code','Item','UOM','Opening','Received','Consumption','Expected','Physical','Variance','By','Status']];
      rows.forEach(j => j.lines.forEach(l => {
         const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
-        out.push([j.id, j.date, j.month||'', storeLabel(j.storeId), it?it.code:(l.itemCode||''), it?it.name:(l.itemName||''), l.uom, l.opening, l.consumption, l.expected, l.physical, l.variance, j.byName, j.status]);
+        out.push([j.id, j.date, j.month||'', storeLabel(j.storeId), it?it.code:(l.itemCode||''), it?it.name:(l.itemName||''), l.uom, l.opening, l.received || 0, l.consumption, l.expected, l.physical, l.variance, j.byName, j.status]);
     }));
     downloadCSV(out, 'inventory_journals.csv');
 }
@@ -5100,7 +5344,7 @@ function exportDailyVarianceCSV(){
     const myStoreIds = new Set(getMyStores());
     const rows = DB.journals.filter(j => myStoreIds.has(j.storeId) && j.type === 'daily');
     if (rows.length === 0) { toast('Nothing','error'); return; }
-       const out = [['Audit No','Date','Store','Stage','Item Code','Item','UOM','Opening','Consumption','Expected','Physical','Variance','Value Impact','Store Remark','Action Plan','Created By','Acknowledged By']];
+         const out = [['Audit No','Date','Store','Stage','Item Code','Item','UOM','Opening','Received','Consumption','Expected','Physical','Variance','Value Impact','Store Remark','Action Plan','Created By','Acknowledged By']];
     rows.forEach(j => j.lines.forEach(l => {
             const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
         const valueImpact = (l.variance||0) * (it ? it.cost : 0);
@@ -5108,7 +5352,7 @@ function exportDailyVarianceCSV(){
         out.push([
             j.id, j.date, storeLabel(j.storeId), stage,
             it?it.code:'', it?it.name:'', l.uom,
-            l.opening, l.consumption, l.expected, l.physical, l.variance,
+            l.opening, l.received || 0, l.consumption, l.expected, l.physical, l.variance,
             valueImpact.toFixed(2),
             l.storeRemark || l.store_remark || '',
             j.actionPlan || '',
