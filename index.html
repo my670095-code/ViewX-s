@@ -4013,7 +4013,7 @@ function parseAuditOpening(aoa, filename){
     if (btn) btn.disabled = valid.length === 0;
 }
 
-function auditWizardStartCount(){
+async function auditWizardStartCount(){
     if (!_auditOpeningParsed || _auditOpeningParsed.valid.length === 0) {
         toast('Upload an Opening Stock file first.', 'error');
         return;
@@ -4040,14 +4040,19 @@ function auditWizardStartCount(){
         createdAt: nowISO(),
         lines: []
     };
-        // ── Sales gate (Decision 6A) ──
-    const salesUpload = DB.salesUploads.find(s => s.storeId === d.storeId && s.date === d.date);
-    if (!salesUpload) {
+    
+       // ── Sales gate (checks IndexedDB staged files, not Supabase) ──
+    let stagedSales = [];
+    try {
+        stagedSales = await StagedFiles.find(u.id, d.storeId, d.date, 'sales');
+    } catch(e) {
+        console.warn('Staged sales lookup failed', e);
+    }
+    if (stagedSales.length === 0) {
         _auditOpeningParsed = null;
         showNoSalesGate(header);
         return;
     }
-
     const result = buildCountLines(header);
     if (result.lines.length === 0) {
         toast('No items to count (no opening + no consumption).', 'error');
