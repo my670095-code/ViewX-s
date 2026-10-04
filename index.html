@@ -4113,8 +4113,10 @@ async function processSalesRows(rows, filename, tag){
             productId: bom.productId,
             bomId: bom.id,
             qty
-        });
+           });
     });
+
+    if (parsed.length === 0) {
         toast('No valid rows to import', 'error');
         if (rejects.length > 0) showRejectReport(rejects, filename);
         return;
