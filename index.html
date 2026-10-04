@@ -3797,6 +3797,118 @@ async function confirmBOMImport(){
 }
 
 /* ---------- SALES UPLOAD (Daily only) ---------- */
+    /* ══════════════════════════════════════════════════════════════
+   Sales file normalizer — detects 2 file formats:
+   A) POS "Product Mix Report"  (grouped, has "Category NN" headers)
+   B) Flat "Item Wise Consumption" export  (INVD_ITEM / QTY columns)
+   Both return: [{ itemCode, qty }]
+   ══════════════════════════════════════════════════════════════ */
+function normalizeSalesFile(aoa) {
+    if (!aoa || aoa.length === 0) return { rows: [], format: 'empty' };
+
+    // Look at the first ~40 rows for signature strings
+    const probe = aoa.slice(0, 40).map(r =>
+        (r || []).map(c => String(c || '').trim())
+    );
+    const flat = probe.flat().map(s => s.toLowerCase());
+
+    const isProductMix =
+        flat.some(s => s.startsWith('category ')) ||
+        flat.some(s => s === 'item#' || s === 'item #') ||
+        flat.some(s => /^dob total$/i.test(s));
+
+    const isFlatConsumption =
+        probe.some(row => row.some(c => /^invd_item$/i.test(c))) ||
+        probe.some(row => row.some(c => /^invd_str_id$/i.test(c)));
+
+    if (isFlatConsumption) return parseFlatConsumption(aoa);
+    if (isProductMix)      return parseProductMix(aoa);
+
+    return { rows: [], format: 'unknown' };
+}
+
+/* ── Format B: flat "Item Wise Consumption" export ── */
+function parseFlatConsumption(aoa) {
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(aoa.length, 20); i++) {
+        const lc = (aoa[i] || []).map(c => String(c||'').trim().toLowerCase());
+        if (lc.includes('invd_item') && lc.includes('qty')) { headerIdx = i; break; }
+    }
+    if (headerIdx < 0) return { rows: [], format: 'flat', error: 'No header row' };
+
+    const hdr = (aoa[headerIdx] || []).map(c => String(c||'').trim().toLowerCase());
+    const idx = {
+        item:  hdr.indexOf('invd_item'),
+        qty:   hdr.indexOf('qty'),
+        cat:   hdr.indexOf('invd_category'),
+        date:  hdr.indexOf('invd_dob'),
+        store: hdr.indexOf('invd_str_id')
+    };
+
+    const byItem = new Map();
+    const SKIP_CATS = new Set(['94','115','152','0']);
+
+    for (let i = headerIdx + 1; i < aoa.length; i++) {
+        const row = aoa[i] || [];
+        const cat = String(row[idx.cat] ?? '').trim();
+        if (SKIP_CATS.has(cat)) continue;
+
+        const code = String(row[idx.item] ?? '').trim();
+        if (!code) continue;
+        if (/^800/.test(code)) continue;   // modifier SKUs
+
+        const qty = Number(row[idx.qty]);
+        if (!qty || qty <= 0) continue;
+
+        byItem.set(code, (byItem.get(code) || 0) + qty);
+    }
+    return {
+        rows: [...byItem].map(([itemCode, qty]) => ({ itemCode, qty })),
+        format: 'flat'
+    };
+}
+
+/* ── Format A: POS "Product Mix Report" (grouped text) ── */
+function parseProductMix(aoa) {
+    const byItem = new Map();
+    const SKIP_CATS = new Set(['94','115','152']);
+
+    let inSkipCategory = false;
+
+    for (let i = 0; i < aoa.length; i++) {
+        const row = (aoa[i] || []).map(c => String(c == null ? '' : c).trim());
+        const line = row.join(' ').trim();
+        if (!line) continue;
+
+        // Category header:  "Category 10   Drip Coffee"
+        const catMatch = line.match(/^Category\s+(\d+)\b/i);
+        if (catMatch) {
+            inSkipCategory = SKIP_CATS.has(catMatch[1]);
+            continue;
+        }
+
+        // Totals / footer / column-header lines → skip
+        if (/^Total\b/i.test(line))      continue;
+        if (/^DOB Total\b/i.test(line))  continue;
+        if (/^Grand Total\b/i.test(line)) continue;
+        if (/^Item\s*#/i.test(row[0]))   continue;
+
+        if (inSkipCategory) continue;
+
+        // Data row: [itemCode, itemName, qty, price]
+        const code = row[0];
+        const qty  = Number(row[2]);
+        if (!/^\d{4,}$/.test(code)) continue;
+        if (!qty || qty <= 0) continue;
+        if (/^800/.test(code)) continue;
+
+        byItem.set(code, (byItem.get(code) || 0) + qty);
+    }
+    return {
+        rows: [...byItem].map(([itemCode, qty]) => ({ itemCode, qty })),
+        format: 'productmix'
+    };
+}
 RENDERERS.sales = function(){
     const u = currentUser();
     const canUpload = can('uploadSales');
@@ -3852,7 +3964,7 @@ RENDERERS.sales = function(){
                 <div class="upload-text">Click to upload or drag & drop</div>
                 <div class="upload-hint">Excel (.xlsx, .xls, .csv) · Store Code, Product ID, Qty</div>
             </div>
-            <input type="file" id="fileInput" class="upload-file" accept=".xlsx,.xls,.csv" onchange="handleSalesUpload(event)">
+<input type="file" id="fileInput" class="upload-file" accept=".xlsx,.xls,.csv,.txt" onchange="handleSalesUpload(event)">
         </div>
     </div>` : ''}
     <div class="panel">
@@ -3910,7 +4022,8 @@ async function handleSalesUpload(evt){
     }
 
     const batchDate = (document.getElementById('salesBatchDate')?.value) || todayISO();
-        const u = currentUser();
+    const u = currentUser();
+
     // Warn once if user is re-uploading over a staged file for the same store+date
     try {
         const existing = await StagedFiles.find(u.id, selectedStoreId, batchDate, 'sales');
@@ -3922,82 +4035,86 @@ async function handleSalesUpload(evt){
             await StagedFiles.deleteFor(u.id, selectedStoreId, batchDate);
         }
     } catch(e) { console.warn('Staged check failed', e); }
+
     const monthTag = monthTagFromISO(batchDate);
+    const isTxt = /\.txt$/i.test(file.name);
+
     const reader = new FileReader();
     reader.onload = async function(e){
         try {
-            const data = new Uint8Array(e.target.result);
-            const wb = XLSX.read(data, { type:'array', cellDates: true });
+            let wb;
+            if (isTxt) {
+                // Read as text so SheetJS treats the report as CSV
+                wb = XLSX.read(e.target.result, { type: 'string' });
+            } else {
+                const data = new Uint8Array(e.target.result);
+                wb = XLSX.read(data, { type:'array', cellDates: true });
+            }
             const sheet = wb.Sheets[wb.SheetNames[0]];
-            const json = XLSX.utils.sheet_to_json(sheet, { defval:'', raw: true });
-            await processSalesRows(json, file.name, { batchDate, monthTag, forcedStoreId: selectedStoreId });
+            // Read as raw rows so we can inspect the report structure
+            const aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
+
+            const { rows, format } = normalizeSalesFile(aoa);
+            if (rows.length === 0) {
+                toast('No valid Item Code + Qty rows found in this file.', 'error');
+                evt.target.value = '';
+                return;
+            }
+            console.log('[sales upload] format=' + format + ' rows=' + rows.length);
+
+            // Convert to flat { Product ID, Qty } that processSalesRows expects
+            const flatRows = rows.map(r => ({ 'Product ID': r.itemCode, 'Qty': r.qty }));
+            await processSalesRows(flatRows, file.name, {
+                batchDate, monthTag, forcedStoreId: selectedStoreId,
+                detectedFormat: format
+            });
         } catch(err) { toast('Parse failed: ' + err.message, 'error'); }
     };
-    reader.readAsArrayBuffer(file);
+
+    if (isTxt) {
+        reader.readAsText(file);
+    } else {
+        reader.readAsArrayBuffer(file);
+    }
     evt.target.value = '';
 }
 async function processSalesRows(rows, filename, tag){
     const u = currentUser();
     const myStoreIds = new Set(getMyStores(u));
     if (rows.length === 0) { toast('File is empty', 'error'); return; }
-    const H = {
-        storeCode: ['store code','store','storecode','store_code','branch','branch code','invd_str_id'],
-        productId: ['product id','product code','productid','productcode','sku','item code','item','invd_item'],
-        qty:       ['qty','qty sold','quantity','sold','sales','units','units sold','sale qty'],
-        date:      ['date','sale date','sales date','transaction date','txn date','day','invd_dob']
-    };
-    function pick(obj, keys){
-        for (const k of Object.keys(obj)) if (keys.includes(k.toLowerCase().trim())) return obj[k];
-        return '';
-    }
+
     const parsed = [], rejects = [];
     const forcedStore = tag.forcedStoreId ? getStore(tag.forcedStoreId) : null;
     if (!forcedStore) { toast('Selected store not found.', 'error'); return; }
     if (!myStoreIds.has(forcedStore.id)) { toast('Selected store is out of your scope.', 'error'); return; }
 
-       rows.forEach((row, i) => {
-        const lineNo = i + 2;
+    // Rows arrive pre-normalized as { 'Product ID': '...', 'Qty': ... }
+    rows.forEach((row, i) => {
+        const lineNo = i + 1;
+        const productId = String(row['Product ID'] ?? '').trim();
+        const qtyRaw    = row['Qty'];
 
-        // ── Skip non-product categories and modifier SKUs ──
-        // Only real products (that have a BOM) should be exploded.
-        const catRaw = String(pick(row, ['invd_category','category']) || '').trim();
-        if (catRaw === '94' || catRaw === '152' || catRaw === '115' || catRaw === '0') {
-            tag._categorySkipped = (tag._categorySkipped || 0) + 1;
-            return;
-        }
-
-        const productId = String(pick(row, H.productId) || '').trim();
+        if (!productId) { rejects.push(`Row ${lineNo}: missing Item Code`); return; }
         if (/^800/.test(productId)) {
             tag._modifierSkipped = (tag._modifierSkipped || 0) + 1;
             return;
         }
 
-        const storeCode = String(pick(row, H.storeCode) || '').trim();   // informational only
-        const qtyRaw    = pick(row, H.qty);
-        if (!productId && qtyRaw === '') return;
-        if (!productId) { rejects.push(`Row ${lineNo}: missing Product ID`); return; }
-
-        // ★ FORCE: every row is credited to the selected store,
-        //   regardless of what the Excel Store Code says.
-        const rowStore = forcedStore;
-
-              const bom = getBOMByProductId(productId);
-        if (!bom) { rejects.push(`Row ${lineNo}: No BOM for Product ID "${productId}"`); return; }
-
         const qty = Number(qtyRaw);
-        if (isNaN(qty) || qty <= 0) { rejects.push(`Row ${lineNo}: invalid Qty "${qtyRaw}"`); return; }
+        if (!qty || qty <= 0) { rejects.push(`Row ${lineNo}: invalid Qty "${qtyRaw}"`); return; }
 
-        // Optional: collect a warning if the Excel mentions a different store
-        if (storeCode && norm(storeCode) !== norm(forcedStore.code)) {
-            // Track for a summary warning (do not reject)
-            const key = storeCode.toUpperCase();
-            if (!tag._storeMismatches) tag._storeMismatches = {};
-            tag._storeMismatches[key] = (tag._storeMismatches[key] || 0) + 1;
-        }
+        const bom = getBOMByProductId(productId);
+        if (!bom) { rejects.push(`Row ${lineNo}: No BOM for Item Code "${productId}"`); return; }
 
-        parsed.push({ lineNo, storeId: rowStore.id, storeCode: rowStore.code, productId: bom.productId, bomId: bom.id, qty });
+        parsed.push({
+            lineNo,
+            storeId: forcedStore.id,
+            storeCode: forcedStore.code,
+            productId: bom.productId,
+            bomId: bom.id,
+            qty
+        });
     });
-    if (parsed.length === 0) {
         toast('No valid rows to import', 'error');
         if (rejects.length > 0) showRejectReport(rejects, filename);
         return;
