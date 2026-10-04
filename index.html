@@ -3893,11 +3893,34 @@ function parseProductMix(aoa) {
         if (/^Grand Total\b/i.test(line)) continue;
         if (/^Item\s*#/i.test(row[0]))   continue;
 
-        if (inSkipCategory) continue;
+          if (inSkipCategory) continue;
 
-        // Data row: [itemCode, itemName, qty, price]
-        const code = row[0];
-        const qty  = Number(row[2]);
+        // Data row after our whitespace-split:
+        //   [itemCode, itemName, qty, price]
+        // But some POS lines merge name into col0 — handle both.
+        let code = String(row[0] || '').trim();
+        let qty  = 0;
+
+        // Case A: proper split — col0 is just the code
+        if (/^\d{4,}$/.test(code)) {
+            qty = Number(row[2]);
+        }
+        // Case B: col0 = "711002 Fresh COD T" and qty got merged
+        else {
+            const m = code.match(/^(\d{4,})\s+(.*)$/);
+            if (m) {
+                code = m[1];
+                // Find the qty: it's the numeric token after the name
+                // Look across all remaining cells
+                const tail = [m[2], ...row.slice(1)].join(' ');
+                const nums = tail.match(/\b\d+(?:\.\d+)?\b/g) || [];
+                // qty is usually the first standalone integer after the name
+                if (nums.length >= 1) qty = Number(nums[0]);
+            } else {
+                continue;
+            }
+        }
+
         if (!/^\d{4,}$/.test(code)) continue;
         if (!qty || qty <= 0) continue;
         if (/^800/.test(code)) continue;
@@ -4041,18 +4064,35 @@ async function handleSalesUpload(evt){
 
     const reader = new FileReader();
     reader.onload = async function(e){
-        try {
-            let wb;
+              try {
+            let aoa;
+
             if (isTxt) {
-                // Read as text so SheetJS treats the report as CSV
-                wb = XLSX.read(e.target.result, { type: 'string' });
+                // The Product Mix report is WHITESPACE-separated, not CSV.
+                // Split each line into tokens ourselves.
+                const text = String(e.target.result || '');
+                const lines = text.split(/\r?\n/);
+                aoa = lines.map(line => {
+                    // Split on 2+ spaces or tabs so "711002 Fresh COD T   4   44"
+                    // becomes ["711002 Fresh COD T", "4", "44"]
+                    // But keep the item code separate from the name too.
+                    const raw = String(line);
+                    // First, extract leading code + rest
+                    const m = raw.match(/^(\S+)\s+(.*)$/);
+                    if (!m) return [raw.trim()];
+                    const col0 = m[1];                       // itemCode (e.g. 711002)
+                    const rest = m[2];                       // "Fresh COD T   4   44"
+                    // Split the rest on runs of 2+ spaces
+                    const parts = rest.split(/\s{2,}/).map(s => s.trim()).filter(s => s !== '');
+                    // If we got name + qty + price, keep them separate
+                    return [col0, ...parts];
+                });
             } else {
                 const data = new Uint8Array(e.target.result);
-                wb = XLSX.read(data, { type:'array', cellDates: true });
+                const wb = XLSX.read(data, { type:'array', cellDates: true });
+                const sheet = wb.Sheets[wb.SheetNames[0]];
+                aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
             }
-            const sheet = wb.Sheets[wb.SheetNames[0]];
-            // Read as raw rows so we can inspect the report structure
-            const aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
 
             const { rows, format } = normalizeSalesFile(aoa);
             if (rows.length === 0) {
