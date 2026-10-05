@@ -2186,7 +2186,7 @@ RENDERERS.dashboard = function(){
                 return `<tr>
                     <td><b>${esc(j.id)}</b></td><td>${esc(j.date)}</td>
                     <td>${esc(storeLabel(j.storeId))}</td>
-                    <td class="${tv>0?'red':tv<0?'green':''}">${tv>0?'+':''}${fmtNum(tv)}</td>
+                    <td class="${tv>0?'green':tv<0?'red':''}">${tv>0?'+':''}${fmtNum(tv)}</td>
                     <td>${esc(j.byName)}</td>
                 </tr>`;
             }).join('')}</tbody></table>`}
@@ -4399,14 +4399,13 @@ function renderCountList(rows){
             const canRespond = isStoreUser && stage === 'awaiting_store';
             const canReceive = !isStoreUser && stage === 'awaiting_receiving'
                                && ['admin','opmanager','area'].includes(u.role);
-
             return `<tr>
                 <td><b>${esc(j.id)}</b></td>
                 <td>${esc(j.date)}</td>
                 <td>${esc(storeLabel(j.storeId))}</td>
                 <td>${j.lines.length}</td>
-                <td class="${tv>0?'red':tv<0?'green':''}">${tv>0?'+':''}${fmtNum(tv)}</td>
-                <td class="${val>0?'red':val<0?'green':''}">SAR ${fmtNum(val)}</td>
+                <td class="${tv>0?'green':tv<0?'red':''}">${tv>0?'+':''}${fmtNum(tv)}</td>
+                <td class="${val>0?'green':val<0?'red':''}">SAR ${fmtNum(val)}</td>
                 <td>${esc(j.byName)}</td>
                 <td>${stageBadge}</td>
                 <td class="actions-cell">
@@ -4781,8 +4780,8 @@ function updateViewPhysical(idx, value){
         const vCell = tr.querySelector('[data-variance]');
         if (vCell) {
             const v = line.variance;
-            vCell.textContent = (v > 0 ? '+' : '') + fmtNum(v);
-            vCell.className = v > 0 ? 'red' : v < 0 ? 'green' : '';
+                      vCell.textContent = (v > 0 ? '+' : '') + fmtNum(v);
+            vCell.className = v > 0 ? 'green' : v < 0 ? 'red' : '';
             vCell.style.textAlign = 'right';
         }
     }
@@ -5065,10 +5064,10 @@ function renderReceivingRows(){
         if (s.key === 'variance')    return (a.variance - b.variance) * s.dir;
         return String(a[s.key]).localeCompare(String(b[s.key])) * s.dir;
     });
-
+    
     document.getElementById('receivingBody').innerHTML = rows.map(r => {
         const v = r.variance;
-        const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
+        const vClass = v > 0 ? 'green' : v < 0 ? 'red' : '';
         return `<tr data-idx="${r.idx}">
             <td><b>${esc(r.code)}</b></td>
             <td>${esc(r.name)}</td>
@@ -5104,8 +5103,8 @@ function updateReceivingLine(idx, value){
         if (eCell) eCell.textContent = fmtNum(line.expected);
         if (vCell) {
             const v = line.variance;
-            vCell.textContent = (v>0?'+':'') + fmtNum(v);
-            vCell.className = v > 0 ? 'red' : v < 0 ? 'green' : '';
+                        vCell.textContent = (v>0?'+':'') + fmtNum(v);
+            vCell.className = v > 0 ? 'green' : v < 0 ? 'red' : '';
             vCell.style.textAlign = 'right';
         }
     }
@@ -5222,10 +5221,10 @@ function openAcknowledgeSheet(id){
                 <th style="width:280px">Store Remark</th>
             </tr></thead>
             <tbody id="ackBody">
-                           ${varianceLines.map((l, idx) => {
+                ${varianceLines.map((l, idx) => {
                     const it = getItem(l.itemId) || DB.items.find(x => x.code === l.itemCode);
                     const v = l.variance || 0;
-                    const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
+                    const vClass = v > 0 ? 'green' : v < 0 ? 'red' : '';
                                  return `<tr data-item-id="${l.itemId}">
                         <td><b>${esc(it?.code || l.itemCode || '?')}</b></td>
                         <td>${esc(it?.name || l.itemName || 'Unknown')}</td>
@@ -5397,10 +5396,9 @@ async function submitAcknowledgment(){
 
     const colspan = isEdit ? 8 : (showRemark ? 10 : 9);
 
-    document.getElementById('viewCountBody').innerHTML = rows.map(r => {
+        document.getElementById('viewCountBody').innerHTML = rows.map(r => {
         const v = r.variance;
-        const vClass = v > 0 ? 'red' : v < 0 ? 'green' : '';
-
+        const vClass = v > 0 ? 'green' : v < 0 ? 'red' : '';
         const physicalCell = isEdit
             ? `<input type="number" step="0.01"
                       value="${r.physical ?? ''}"
