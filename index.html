@@ -1175,6 +1175,7 @@ const DataLayer = {
                 status: j.status, createdAt: j.created_at,
                 auditStage: j.audit_stage || 'submitted',
                 audit_stage: j.audit_stage || 'submitted',
+                dailyOnly: j.daily_only === true,          // ← ADD
                 openingUploadRef: j.opening_upload_ref || null,
                 openingLines: j.opening_lines || null,
                 acknowledgedById: j.acknowledged_by_id || null,
@@ -1396,7 +1397,8 @@ const DataLayer = {
                 status: journal.status || 'Submitted',
                 audit_stage: journal.auditStage || 'awaiting_store',
                 opening_upload_ref: null,
-                opening_lines: null
+                opening_lines: null,
+                daily_only: journal.dailyOnly === true
             },
                         p_lines: journal.lines.map(l => {
                 const it = getItem(l.itemId);
@@ -2204,9 +2206,12 @@ async function buildCountLines(journal){
     const groupAcc = new Map();       // groupId -> { group, opening, consumption, uom, memberIds:Set }
     const ungroupedIds = [];
 
+    const dailyOnly = journal.dailyOnly === true;   // ★ opt-in filter
+
     allItemIds.forEach(itemId => {
         const item = getItem(itemId);
         if (!item || item.status !== 'Active') return;
+        if (dailyOnly && !item.daily) return;       // ★ NEW — skip non-daily items
 
         const group = itemToGroup.get(itemId) || null;
         if (!group) {
@@ -5110,6 +5115,17 @@ async function auditWizardStep2(){
             <b>Step 2:</b> Upload the <b>Opening Stock file</b> for this audit.
             ${salesFound ? '✅ Sales file staged on this device.' : '⚠ No sales file staged yet — you can still upload opening, but the check sheet will block until sales is staged.'}
         </div>
+
+        <div class="form-row" style="margin-top:14px;background:#f8fafc;border:1px solid #e8edf3;border-radius:8px;padding:12px 14px">
+            <label style="display:flex;align-items:center;gap:10px;text-transform:none;letter-spacing:0;font-size:13px;font-weight:600;cursor:pointer">
+                <input type="checkbox" id="wizDailyOnly" style="width:auto;margin:0">
+                <span>Count only items marked <b>Daily</b> in Item Master</span>
+            </label>
+            <div style="font-size:11.5px;color:#64748b;margin-top:6px;margin-left:26px">
+                Leave unchecked to include every item present in the Opening file or consumed by sales.
+            </div>
+        </div>
+
         <div class="form-row" style="margin-top:18px">
             <label>Opening Stock File (SKU + Counted)</label>
             <div class="upload-drop" onclick="document.getElementById('auditOpeningFile').click()" style="padding:24px 20px">
@@ -5215,6 +5231,8 @@ async function auditWizardStartCount(){
     const monthTag = monthTagFromISO(d.date);
     const journalNo = nextJournalNo('INV', d.date);
 
+    const dailyOnly = document.getElementById('wizDailyOnly')?.checked === true;   // ← NEW
+
     const header = {
         id: journalNo,
         type: 'daily',
@@ -5225,6 +5243,7 @@ async function auditWizardStartCount(){
         byName: u.name,
         status: 'Draft',
         auditStage: 'draft',
+        dailyOnly: dailyOnly,                                                       // ← NEW
         openingLines: _auditOpeningParsed.valid.map(r => ({
             itemId: r.itemId, qty: r.qty, uom: r.uom
         })),
