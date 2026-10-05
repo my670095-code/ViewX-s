@@ -3298,12 +3298,6 @@ RENDERERS.items = function(){
             <option value="">All Categories</option>
             ${[...new Set(DB.items.map(i=>i.cat))].map(c=>`<option>${esc(c)}</option>`).join('')}
         </select>
-        <select id="itemFreqFilter" onchange="filterItems()">
-            <option value="">All Frequencies</option>
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-        </select>
         ${canCreate?`<button class="btn-primary" onclick="openItemModal()">+ New Item</button>`:''}
         ${canCreate?`<button class="btn-light" onclick="openItemImportModal()">📥 Import from Excel</button>`:''}
     </div>
@@ -3318,20 +3312,12 @@ RENDERERS.items = function(){
 function renderItemsTable(rows){
     if (rows.length === 0) return '<div class="empty">No items yet.</div>';
     return `<table>
-        <thead><tr>
-            <th>Code</th><th>Name</th><th>Category</th><th>UOM</th><th>Cost</th>
-            <th style="text-align:center">D</th>
-            <th style="text-align:center">W</th>
-            <th style="text-align:center">M</th>
-            <th>Status</th><th>Actions</th>
-        </tr></thead>
+        <thead><tr><th>Code</th><th>Name</th><th>Category</th><th>UOM</th><th>Cost</th><th>Daily</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>${rows.map(i=>`
             <tr>
                 <td>${esc(i.code)}</td><td>${esc(i.name)}</td><td>${esc(i.cat)}</td>
                 <td>${esc(i.uom)}</td><td>SAR ${fmtNum(i.cost)}</td>
-                <td style="text-align:center">${i.daily?'<span class="green">✓</span>':'-'}</td>
-                <td style="text-align:center">${i.weekly?'<span class="green">✓</span>':'-'}</td>
-                <td style="text-align:center">${i.monthly?'<span class="green">✓</span>':'-'}</td>
+                <td>${i.daily?'✓':'-'}</td>
                 <td>${badge(i.status)}</td>
                 <td class="actions-cell">
                     ${editBtn('item', i.id, 'openItemModal')}
@@ -3342,11 +3328,9 @@ function renderItemsTable(rows){
 function filterItems(){
     const q = document.getElementById('itemSearch').value.toLowerCase();
     const c = document.getElementById('itemCatFilter').value;
-    const f = document.getElementById('itemFreqFilter')?.value || '';
     let rows = DB.items;
     if (q) rows = rows.filter(i => (i.code+i.name+i.cat).toLowerCase().includes(q));
     if (c) rows = rows.filter(i => i.cat===c);
-    if (f) rows = rows.filter(i => !!i[f]);   // i.daily / i.weekly / i.monthly
     document.getElementById('itemsTableBody').innerHTML = renderItemsTable(rows);
     document.getElementById('itemCount').textContent = rows.length + ' Items';
 }
