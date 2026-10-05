@@ -872,7 +872,7 @@ const ROLE_LABEL = {
 };
 
 const PERMISSIONS = {
-    admin:     ['dashboard','sales','daily','items','bom','stores','employees','reports','users','recycle','backup'],
+    admin:     ['dashboard','sales','daily','items','bom','groups','stores','employees','reports','users','recycle','backup'],
     opmanager: ['dashboard','sales','daily','items','bom','stores','employees','reports'],
     area:      ['dashboard','sales','daily','items','bom','stores','employees','reports'],
     store:     ['dashboard','sales','daily'],
@@ -887,6 +887,8 @@ const ACTIONS = {
     acknowledgeAudit:    ['admin','store'],              // ← NEW
     createItem:          ['admin'],
     createBOM:           ['admin'],
+    createGroup:         ['admin'],
+    deleteGroup:         ['admin'],
     createStore:         ['admin'],
     createEmployee:      ['admin'],
     manageUsers:         ['admin'],
@@ -904,7 +906,8 @@ function defaultData(){
         ],
                 stores: [], items: [], bom: [], employees: [],
         salesUploads: [], consumptionLedger: [],
-        journals: [],
+                journals: [],
+        itemGroups: [],
         closedMonths: [], voidedRecords: [], auditLog: []
     };
 }
@@ -987,6 +990,70 @@ const DataLayer = {
         }
         return { data: all, error: null };
     },
+        async loadGroups() {
+        if (CLOUD_MODE === 'local') return [];
+        const [groups, members] = await Promise.all([
+            SB.from('item_groups').select('*'),
+            SB.from('item_group_members').select('*')
+        ]);
+        if (groups.error) return [];
+        return (groups.data || []).map(g => ({
+            id: g.id,
+            code: g.code,
+            name: g.name,
+            uom: g.uom,
+            status: g.status,
+            members: (members.data || [])
+                .filter(m => m.group_id === g.id)
+                .map(m => ({
+                    itemId: m.item_id,
+                    itemCode: m.item_code,
+                    itemName: m.item_name
+                }))
+        }));
+    },
+
+    async insertGroup(row) {
+        if (CLOUD_MODE === 'local') return row;
+        const { error: e1 } = await SB.from('item_groups').insert({
+            id: row.id, code: row.code, name: row.name,
+            uom: row.uom, status: row.status || 'Active'
+        });
+        if (e1) throw e1;
+        if (row.members.length > 0) {
+            const { error: e2 } = await SB.from('item_group_members').insert(
+                row.members.map(m => ({
+                    group_id: row.id,
+                    item_id: m.itemId,
+                    item_code: m.itemCode,
+                    item_name: m.itemName
+                }))
+            );
+            if (e2) throw e2;
+        }
+    },
+
+    async updateGroup(id, row) {
+        if (CLOUD_MODE === 'local') return row;
+        const { error: e1 } = await SB.from('item_groups').update({
+            code: row.code, name: row.name, uom: row.uom
+        }).eq('id', id);
+        if (e1) throw e1;
+        const { error: e2 } = await SB.from('item_group_members').delete().eq('group_id', id);
+        if (e2) throw e2;
+        if (row.members.length > 0) {
+            const { error: e3 } = await SB.from('item_group_members').insert(
+                row.members.map(m => ({
+                    group_id: id,
+                    item_id: m.itemId,
+                    item_code: m.itemCode,
+                    item_name: m.itemName
+                }))
+            );
+            if (e3) throw e3;
+        }
+    },
+
 
     async loadVoided() {
         if (CLOUD_MODE === 'local') return [];
@@ -1017,8 +1084,8 @@ const DataLayer = {
         if (CLOUD_MODE === 'local') {
             return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || defaultData();
         }
-        const [stores, items, bom, employees, profiles,
-               salesUploads, ledger, journals] = await Promise.all([
+                const [stores, items, bom, employees, profiles,
+               salesUploads, ledger, journals, itemGroups] = await Promise.all([
             SB.from('stores').select('*').eq('status','Active'),
             this.fetchAll('items',       { order: 'id' }),
             this.fetchAll('bom',         { order: 'id' }),
@@ -1026,7 +1093,8 @@ const DataLayer = {
             SB.from('profiles').select('*'),
             SB.from('sales_uploads').select('*').order('created_at', { ascending: false }).limit(500),
             SB.from('consumption_ledger').select('*').order('created_at', { ascending: false }).limit(500),
-            SB.from('journals').select('*').eq('type', 'daily').order('created_at', { ascending: false }).limit(500)
+            SB.from('journals').select('*').eq('type', 'daily').order('created_at', { ascending: false }).limit(500),
+            this.loadGroups()
         ]);
 
         if (stores.error) throw stores.error;
@@ -1136,6 +1204,7 @@ const DataLayer = {
                 }))
             })),
 
+                      itemGroups: itemGroups || [],
             closedMonths: [],
             voidedRecords: await this.loadVoided(),
             auditLog: await this.loadAudit()
@@ -1392,7 +1461,27 @@ function getItem(id){ return DB.items.find(i => i.id===id); }
 function getStoreByCode(c){ return DB.stores.find(s => s.code===c); }
 function getItemByCode(c){ return DB.items.find(i => i.code===c); }
 function getEmployee(id){ return DB.employees.find(e => e.id===id); }
-function getBOMByProductId(pid){ return DB.bom.find(b => norm(b.productId) === norm(pid)); }
+    function getBOMByProductId(pid){ return DB.bom.find(b => norm(b.productId) === norm(pid)); }
+function getGroupByItemId(itemId){
+    if (!DB.itemGroups) return null;
+    return DB.itemGroups.find(g => (g.members || []).some(m => m.itemId === itemId)) || null;
+}
+function getGroupById(id){
+    if (!DB.itemGroups) return null;
+    return DB.itemGroups.find(g => g.id === id) || null;
+}
+function getItemGroups(){
+    return (DB.itemGroups || []).filter(g => g.status === 'Active');
+}
+function nextGroupId(){
+    const list = DB.itemGroups || [];
+    let max = 0;
+    list.forEach(g => {
+        const n = parseInt(String(g.id).replace('GRP-', ''), 10);
+        if (!isNaN(n) && n > max) max = n;
+    });
+    return 'GRP-' + String(max + 1).padStart(5, '0');
+}
 function storeLabel(id){ const s = getStore(id); return s ? `${s.code} — ${s.name}` : (id||'—'); }
 function nextMovementId(prefix, collection, dateStr){
     const [y,m,d] = dateStr.split('-');
@@ -1413,7 +1502,8 @@ function nextJournalNo(prefix, dateStr){ return nextMovementId(prefix, DB.journa
 const ENTITIES = {
     store: { key:'stores', label:'Store', nameField:'name' },
     item: { key:'items', label:'Item', nameField:'name' },
-    bom: { key:'bom', label:'BOM', nameField:'productName' },
+        bom: { key:'bom', label:'BOM', nameField:'productName' },
+    itemGroup: { key:'itemGroups', label:'Item Group', nameField:'name' },
     employee: { key:'employees', label:'Employee', nameField:'name' },
     journal: { key:'journals', label:'Journal', nameField:'id' },
     salesUp: { key:'salesUploads', label:'Sales Upload', nameField:'id' },
@@ -1447,12 +1537,16 @@ function getDeleteBlockers(entityType, id){
             if (asOp.length) blockers.push({ type:'Store (Op Manager)', count:asOp.length, preview:asOp.slice(0,5).map(s=>s.code) });
         }
     }
-    if (entityType === 'journal') {
+     if (entityType === 'journal') {
         const j = DB.journals.find(x => x.id===id);
         if (j) {
             const later = DB.journals.filter(x => x.id !== id && x.storeId === j.storeId && x.status === 'Submitted' && x.createdAt > j.createdAt);
             if (later.length) blockers.push({ type:'Later Journal', count:later.length, preview:later.slice(0,5).map(x=>x.id) });
         }
+    }
+    if (entityType === 'item') {
+        const inGroup = (DB.itemGroups || []).find(g => (g.members || []).some(m => m.itemId === id));
+        if (inGroup) blockers.push({ type:'Item Group', count:1, preview:[inGroup.code] });
     }
 
     return blockers;
@@ -1506,8 +1600,11 @@ async function softDelete(entityType, id, reason){
                 await SB.from('stores').delete().eq('id', id);
             } else if (entityType === 'item') {
                 await SB.from('items').delete().eq('id', id);
-            } else if (entityType === 'employee') {
+                        } else if (entityType === 'employee') {
                 await SB.from('employees').delete().eq('id', id);
+            } else if (entityType === 'itemGroup') {
+                // members cascade via FK
+                await SB.from('item_groups').delete().eq('id', id);
             }
         } catch(err) {
             toast('Delete failed: ' + (err.message || err), 'error');
@@ -1599,10 +1696,28 @@ async function restoreVoided(voidId){
                     uom: restored.uom, cost: restored.cost, daily: restored.daily,
                     weekly: restored.weekly, monthly: restored.monthly, status: restored.status
                 });
-            } else if (v.entityType === 'employee') {
+                            } else if (v.entityType === 'employee') {
                 await SB.from('employees').insert({
                     id: restored.id, code: restored.code, name: restored.name, role: restored.role, status: restored.status
                 });
+            } else if (v.entityType === 'itemGroup') {
+                const { members, ...header } = restored;
+                const { error: e1 } = await SB.from('item_groups').insert({
+                    id: header.id, code: header.code, name: header.name,
+                    uom: header.uom, status: header.status
+                });
+                if (e1) throw e1;
+                if (members && members.length > 0) {
+                    const { error: e2 } = await SB.from('item_group_members').insert(
+                        members.map(m => ({
+                            group_id: header.id,
+                            item_id: m.itemId,
+                            item_code: m.itemCode,
+                            item_name: m.itemName
+                        }))
+                    );
+                    if (e2) throw e2;
+                }
             } else if (v.entityType === 'salesUp') {
                 toast('Sales upload restore not yet supported', 'error');
                 return;
@@ -1885,7 +2000,8 @@ const MENU_STRUCTURE = [
    { id:'daily', icon:'◷', label:'Surprise Inv Check' },
     { section:'Master Data' },
     { id:'items', icon:'▤', label:'Item Master' },
-    { id:'bom', icon:'⌘', label:'BOM / Recipes' },
+       { id:'bom', icon:'⌘', label:'BOM / Recipes' },
+    { id:'groups', icon:'⊞', label:'Item Groups' },
     { id:'stores', icon:'⌂', label:'Stores' },
     { id:'employees', icon:'👥', label:'Employees' },
     { section:'Reports' },
@@ -1951,7 +2067,7 @@ const TITLES = {
     dashboard:'Inventory Dashboard',
     sales:'Sales Upload (BOM Explosion)',
    daily:'Surprise Inv Check',
-    items:'Item Master', bom:'BOM / Recipe Management', stores:'Store Master',
+    items:'Item Master', bom:'BOM / Recipe Management', groups:'Item Groups', stores:'Store Master',
     employees:'Employee Master', reports:'Reports & Analytics', users:'User Management',
     recycle:'Recycle Bin', backup:'Backup / Restore'
 };
@@ -2051,13 +2167,13 @@ async function buildCountLines(journal){
     const auditDate = journal.date;
     const openingLines = journal.openingLines || [];
 
-    // Opening map
+    // Opening map — one entry per itemId
     const openingMap = new Map();
     openingLines.forEach(l => {
         openingMap.set(l.itemId, { qty: Number(l.qty) || 0, uom: l.uom });
     });
 
-    // ── Pull consumption from the STAGED sales file ──
+    // Consumption map — one entry per itemId (from staged sales ledger)
     const consumptionMap = new Map();
     let stagedSales = [];
     try {
@@ -2065,12 +2181,7 @@ async function buildCountLines(journal){
     } catch(e) {
         console.warn('buildCountLines: staged sales lookup failed', e);
     }
-        console.log('[buildCountLines] storeId=', storeId, 'date=', auditDate,
-                'staged entries:', stagedSales.length);
-    // Safety: only use the most recent staged entry so duplicates never accumulate
-    if (stagedSales.length > 1) {
-        stagedSales = [stagedSales[stagedSales.length - 1]];
-    }
+    if (stagedSales.length > 1) stagedSales = [stagedSales[stagedSales.length - 1]];
     for (const s of stagedSales) {
         const ledger = s.payload?.ledgerRec;
         if (!ledger || !Array.isArray(ledger.lines)) continue;
@@ -2080,25 +2191,100 @@ async function buildCountLines(journal){
         });
     }
 
-    // Union of both sets
+    // Union of item IDs from opening and consumption
     const allItemIds = new Set([...openingMap.keys(), ...consumptionMap.keys()]);
 
-    const lines = [];
+    // Build a fast lookup: itemId -> group
+    const itemToGroup = new Map();
+    (DB.itemGroups || []).forEach(g => {
+        (g.members || []).forEach(m => itemToGroup.set(m.itemId, g));
+    });
+
+    // Group accumulators: groupId -> aggregated data
+    const groupAcc = new Map();       // groupId -> { group, opening, consumption, uom, memberIds:Set }
+    const ungroupedIds = [];
+
     allItemIds.forEach(itemId => {
         const item = getItem(itemId);
         if (!item || item.status !== 'Active') return;
 
+        const group = itemToGroup.get(itemId) || null;
+        if (!group) {
+            ungroupedIds.push(itemId);
+            return;
+        }
+
+        // UOM consistency check — refuse to group if mismatched
+        const itemOpenRec = openingMap.get(itemId);
+        const itemUom = itemOpenRec?.uom || item.uom;
+        if (norm(itemUom) !== norm(group.uom)) {
+            console.warn('[buildCountLines] UOM mismatch, showing ungrouped:', itemId, itemUom, '!=', group.uom);
+            ungroupedIds.push(itemId);
+            return;
+        }
+
+        if (!groupAcc.has(group.id)) {
+            groupAcc.set(group.id, {
+                group,
+                opening: 0,
+                consumption: 0,
+                memberIds: new Set(),
+                memberCount: 0
+            });
+        }
+        const acc = groupAcc.get(group.id);
+        acc.opening += openingMap.get(itemId)?.qty || 0;
+        acc.consumption += consumptionMap.get(itemId) || 0;
+        acc.memberIds.add(itemId);
+        acc.memberCount += 1;
+    });
+
+    // Build output lines
+    const lines = [];
+
+    // Grouped lines first
+    groupAcc.forEach(acc => {
+        const expected = acc.opening - acc.consumption;
+        lines.push({
+            itemId: acc.group.id,
+            itemCode: acc.group.code,
+            itemName: acc.group.name,
+            uom: acc.group.uom,
+            opening: acc.opening,
+            received: 0,
+            purchases: 0,
+            transfersIn: 0, transfersOut: 0,
+            consumption: acc.consumption,
+            expected,
+            physical: null,
+            variance: 0,
+            mtdPurchases: 0,
+            mtdTransfersIn: 0, mtdTransfersOut: 0,
+            mtdConsumption: acc.consumption,
+            store_remark: '',
+            store_remark_by: null,
+            store_remark_at: null,
+            isGroup: true,
+            groupId: acc.group.id,
+            groupName: acc.group.name,
+            groupMembers: Array.from(acc.memberIds),
+            groupMemberCount: acc.memberCount
+        });
+    });
+
+    // Ungrouped lines
+    ungroupedIds.forEach(itemId => {
+        const item = getItem(itemId);
+        if (!item) return;
         const openRec = openingMap.get(itemId);
         const opening = openRec ? openRec.qty : 0;
         const consumption = consumptionMap.get(itemId) || 0;
         const expected = opening - consumption;
-        const uom = openRec?.uom || item.uom;
-
-            lines.push({
+        lines.push({
             itemId,
             itemCode: item.code,
             itemName: item.name,
-            uom,
+            uom: openRec?.uom || item.uom,
             opening,
             received: 0,
             purchases: 0,
@@ -2112,14 +2298,12 @@ async function buildCountLines(journal){
             mtdConsumption: consumption,
             store_remark: '',
             store_remark_by: null,
-            store_remark_at: null
+            store_remark_at: null,
+            isGroup: false
         });
     });
 
-    lines.sort((a, b) => {
-        const ia = getItem(a.itemId), ib = getItem(b.itemId);
-        return String(ia?.code || '').localeCompare(String(ib?.code || ''));
-    });
+    lines.sort((a, b) => String(a.itemCode || '').localeCompare(String(b.itemCode || '')));
 
     return { lines, openingSource: { source: 'audit-opening-upload', count: openingLines.length } };
 }
@@ -3562,6 +3746,429 @@ async function saveBOM(editId){
     }
     showPage('bom');
 }
+    /* ---------- ITEM GROUPS ---------- */
+RENDERERS.groups = function(){
+    if (!can('createGroup')) return '<div class="denied">Admin only.</div>';
+    const rows = DB.itemGroups || [];
+    return `
+    <div class="toolbar">
+        <input type="text" id="grpSearch" placeholder="Search code or name..." oninput="filterGroups()">
+        <button class="btn-primary" onclick="openGroupModal()">+ New Group</button>
+        <button class="btn-light" onclick="openGroupImportModal()">📥 Import from Excel</button>
+    </div>
+    <div class="panel">
+        <div class="panel-header">
+            <div class="panel-title">Item Groups</div>
+            <span class="badge badge-blue" id="grpCount">${rows.length} Groups</span>
+        </div>
+        <div class="panel-body" id="groupsTableBody">${renderGroupsTable(rows)}</div>
+    </div>
+    <div class="info-block" style="margin-top:16px">
+        <b>How it works:</b> Any SKUs grouped here will appear as <b>one line</b> in Surprise Audits
+        — their Opening and Consumption are summed automatically.
+        <br>All members of a group must share the same <b>UOM</b>.
+    </div>`;
+};
+
+function renderGroupsTable(rows){
+    if (rows.length === 0) return '<div class="empty">No item groups yet.</div>';
+    return `<table>
+        <thead><tr>
+            <th style="width:120px">Group Code</th>
+            <th>Group Name</th>
+            <th style="width:80px">UOM</th>
+            <th>Members</th>
+            <th style="width:80px">Status</th>
+            <th style="width:120px">Actions</th>
+        </tr></thead>
+        <tbody>${rows.map(g => {
+            const memberList = (g.members || []).map(m =>
+                `<span class="badge badge-gray" style="margin:2px 2px 2px 0">${esc(m.itemCode)}</span>`
+            ).join('');
+            return `<tr>
+                <td><b>${esc(g.code)}</b></td>
+                <td>${esc(g.name)}</td>
+                <td>${esc(g.uom)}</td>
+                <td style="max-width:420px">${memberList || '<span style="color:#9ca3af">—</span>'}</td>
+                <td>${badge(g.status || 'Active')}</td>
+                <td class="actions-cell">
+                    ${editBtn('itemGroup', g.id, 'openGroupModal')}
+                    ${deleteBtn('itemGroup', g.id)}
+                </td>
+            </tr>`;
+        }).join('')}</tbody>
+    </table>`;
+}
+
+function filterGroups(){
+    const q = (document.getElementById('grpSearch').value || '').toLowerCase();
+    const rows = (DB.itemGroups || []).filter(g =>
+        (g.code + ' ' + g.name + ' ' + (g.members || []).map(m => m.itemCode).join(' ')).toLowerCase().includes(q)
+    );
+    document.getElementById('groupsTableBody').innerHTML = renderGroupsTable(rows);
+    document.getElementById('grpCount').textContent = rows.length + ' Groups';
+}
+
+function openGroupModal(editId){
+    if (!can('createGroup')) { toast('Admin only.', 'error'); return; }
+    const editing = editId ? getGroupById(editId) : null;
+    const title = editing ? 'Edit Item Group' : 'New Item Group';
+    if (DB.items.length === 0) { toast('Add items in Item Master first.', 'error'); return; }
+
+    const v = {
+        code: editing ? editing.code : '',
+        name: editing ? editing.name : '',
+        uom:  editing ? editing.uom  : 'PCS',
+        members: editing ? JSON.parse(JSON.stringify(editing.members || [])) : []
+    };
+    window._workingGroupMembers = v.members;
+
+    openModal(title, `
+        <div class="form-grid">
+            <div class="form-row"><label>Group Code *</label>
+                <input id="mGCode" value="${esc(v.code)}" placeholder="e.g. CUP12" ${editing ? 'readonly style="background:#f9fafb"' : ''}></div>
+            <div class="form-row"><label>UOM</label>
+                <input id="mGUOM" value="${esc(v.uom)}" placeholder="PCS"></div>
+        </div>
+        <div class="form-row"><label>Group Name *</label>
+            <input id="mGName" value="${esc(v.name)}" placeholder="e.g. Paper Cup 12Oz"></div>
+
+        <div class="form-row" style="margin-top:20px">
+            <label style="display:flex;justify-content:space-between;align-items:center">
+                <span>Member SKUs *</span>
+                <button type="button" class="btn-light btn-sm" onclick="addGroupMember()">+ Add SKU</button>
+            </label>
+            <div class="line-editor">
+                <table><thead><tr>
+                    <th>Item</th>
+                    <th style="width:70px">UOM</th>
+                    <th style="width:50px"></th>
+                </tr></thead><tbody id="groupMembers"></tbody></table>
+            </div>
+            <div style="font-size:12px;color:#6b7280;margin-top:6px">
+                All members must have the same UOM as the group.
+            </div>
+        </div>
+    `, `
+        <button class="btn-light" onclick="closeModal()">Cancel</button>
+        <button class="btn-primary" onclick="saveGroup('${editId||''}')">${editing?'Save Changes':'Create Group'}</button>
+    `);
+    renderGroupMembers();
+}
+
+function addGroupMember(){
+    window._workingGroupMembers.push({ itemId:'', itemCode:'', itemName:'' });
+    renderGroupMembers();
+}
+function removeGroupMember(idx){
+    window._workingGroupMembers.splice(idx, 1);
+    renderGroupMembers();
+}
+function renderGroupMembers(){
+    const lines = window._workingGroupMembers || [];
+    const tbody = document.getElementById('groupMembers');
+    if (!tbody) return;
+    if (lines.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#9ca3af;padding:20px">No members yet</td></tr>';
+        return;
+    }
+    const activeItems = DB.items.filter(i => i.status === 'Active');
+    const alreadyUsed = new Set(lines.map(l => l.itemId).filter(Boolean));
+    tbody.innerHTML = lines.map((l, idx) => {
+        const it = getItem(l.itemId);
+        return `<tr>
+            <td><select onchange="updateGroupMember(${idx}, this.value)">
+                <option value="">— Select item —</option>
+                ${activeItems.map(i => {
+                    const used = alreadyUsed.has(i.id) && i.id !== l.itemId;
+                    return `<option value="${i.id}" ${i.id===l.itemId?'selected':''} ${used?'disabled':''}>${esc(i.code)} — ${esc(i.name)}${used?' (already added)':''}</option>`;
+                }).join('')}
+            </select></td>
+            <td><input value="${esc(it ? it.uom : '')}" readonly style="background:#f9fafb"></td>
+            <td><button type="button" class="btn-danger btn-xs" onclick="removeGroupMember(${idx})">✕</button></td>
+        </tr>`;
+    }).join('');
+}
+function updateGroupMember(idx, itemId){
+    const l = window._workingGroupMembers[idx];
+    if (!l) return;
+    const it = getItem(itemId);
+    l.itemId = itemId;
+    l.itemCode = it ? it.code : '';
+    l.itemName = it ? it.name : '';
+    renderGroupMembers();
+}
+
+async function saveGroup(editId){
+    const code = document.getElementById('mGCode').value.trim();
+    const name = document.getElementById('mGName').value.trim();
+    const uom  = document.getElementById('mGUOM').value.trim() || 'PCS';
+    const members = (window._workingGroupMembers || []).filter(m => m.itemId);
+
+    if (!code || !name) { toast('Code and Name required', 'error'); return; }
+    if (members.length < 2) { toast('Add at least 2 members to a group.', 'error'); return; }
+
+    // UOM consistency check against group UOM
+    const mismatched = members.filter(m => {
+        const it = getItem(m.itemId);
+        return it && norm(it.uom) !== norm(uom);
+    });
+    if (mismatched.length > 0) {
+        toast(`UOM mismatch: ${mismatched.map(m => m.itemCode).join(', ')} (must be ${uom})`, 'error');
+        return;
+    }
+
+    const dup = (DB.itemGroups || []).find(g => norm(g.code) === norm(code) && g.id !== editId);
+    if (dup) { toast('Group code already exists', 'error'); return; }
+
+    // Check that no member is already in another group
+    const otherGroups = (DB.itemGroups || []).filter(g => g.id !== editId);
+    for (const m of members) {
+        const clash = otherGroups.find(g => (g.members || []).some(mm => mm.itemId === m.itemId));
+        if (clash) { toast(`SKU ${m.itemCode} is already in group "${clash.code}"`, 'error'); return; }
+    }
+
+    if (editId) {
+        const g = getGroupById(editId);
+        if (!g) { toast('Not found', 'error'); return; }
+        g.code = code; g.name = name; g.uom = uom;
+        g.members = members.map(m => ({ itemId: m.itemId, itemCode: m.itemCode, itemName: m.itemName }));
+        try { await DataLayer.updateGroup(g.id, g); }
+        catch(err) { toast('Save failed: ' + (err.message || err), 'error'); return; }
+        audit('UPDATE','itemGroup',g.id,{ code, name });
+        closeModal(); toast('Group updated', 'success');
+    } else {
+        const id = nextGroupId();
+        const rec = {
+            id, code, name, uom, status: 'Active',
+            members: members.map(m => ({ itemId: m.itemId, itemCode: m.itemCode, itemName: m.itemName }))
+        };
+        try { await DataLayer.insertGroup(rec); }
+        catch(err) { toast('Save failed: ' + (err.message || err), 'error'); return; }
+        DB.itemGroups.push(rec);
+        audit('CREATE','itemGroup',id,{ code, name });
+        closeModal(); toast('Group created', 'success');
+    }
+    showPage('groups');
+}
+
+/* ---------- ITEM GROUPS — Excel Import ---------- */
+let _groupImportParsed = null;
+function openGroupImportModal(){
+    if (!can('createGroup')) { toast('Admin only.', 'error'); return; }
+    _groupImportParsed = null;
+    openModal('Import Item Groups from Excel', `
+        <div class="info-block">
+            <b>Excel format:</b> First row must be headers.<br>
+            Required columns: <code>Group Code</code>, <code>Group Name</code>, <code>UOM</code>, <code>Item Code</code>.
+            <br>One row per member. Rows with the same Group Code are combined into one group.
+        </div>
+        <div class="form-row">
+            <label>Import Mode</label>
+            <select id="groupImpMode">
+                <option value="add">Add only — skip existing group codes</option>
+                <option value="update" selected>Update existing — replace matching, add new</option>
+                <option value="replace">Replace all — ⚠ delete ALL groups first, then import</option>
+            </select>
+        </div>
+        <div class="upload-drop" onclick="document.getElementById('groupImpFile').click()">
+            <div class="upload-icon">📊</div>
+            <div class="upload-text">Click to upload Excel</div>
+            <div class="upload-hint">.xlsx, .xls, .csv</div>
+        </div>
+        <input type="file" id="groupImpFile" class="upload-file" accept=".xlsx,.xls,.csv" onchange="handleGroupImportFile(event)">
+        <div id="groupImpPreview" style="margin-top:16px"></div>
+    `, `
+        <button class="btn-light" onclick="closeModal()">Cancel</button>
+        <button class="btn-primary" id="groupImpConfirmBtn" onclick="confirmGroupImport()" disabled>Import</button>
+    `);
+}
+
+async function handleGroupImportFile(evt){
+    const file = evt.target.files[0];
+    if (!file) return;
+    if (!XLSX_READY) { toast('Excel library still loading.', 'error'); evt.target.value=''; return; }
+    const reader = new FileReader();
+    reader.onload = function(e){
+        try {
+            const data = new Uint8Array(e.target.result);
+            const wb = XLSX.read(data, { type:'array', cellDates: true });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(sheet, { defval:'', raw: true });
+            parseGroupImport(rows, file.name);
+        } catch(err) { toast('Parse failed: ' + err.message, 'error'); }
+    };
+    reader.readAsArrayBuffer(file);
+    evt.target.value = '';
+}
+
+function parseGroupImport(rows, filename){
+    if (rows.length === 0) { toast('File is empty', 'error'); return; }
+    const H = {
+        gcode: ['group code','groupcode','group','code'],
+        gname: ['group name','groupname','name'],
+        uom:   ['uom','unit','unit of measure'],
+        icode: ['item code','itemcode','item_code','sku']
+    };
+    function pick(obj, keys){
+        for (const k of Object.keys(obj)) {
+            const n = k.toLowerCase().trim().replace(/\s+/g,' ');
+            if (keys.includes(n)) return obj[k];
+        }
+        return undefined;
+    }
+    const itemByCode = new Map();
+    DB.items.forEach(i => itemByCode.set(norm(i.code), i));
+
+    const grouped = new Map();     // groupCode -> { code, name, uom, members:[] }
+    const errors = [], warnings = [];
+
+    rows.forEach((row, i) => {
+        const rowNo = i + 2;
+        const gCodeRaw = String(pick(row, H.gcode) || '').trim();
+        const gNameRaw = String(pick(row, H.gname) || '').trim();
+        const uomRaw   = String(pick(row, H.uom) || '').trim();
+        const iCodeRaw = String(pick(row, H.icode) || '').trim();
+        if (!gCodeRaw && !iCodeRaw) return;
+        if (!gCodeRaw) { errors.push({ line: rowNo, msg: 'Missing Group Code' }); return; }
+        if (!iCodeRaw) { errors.push({ line: rowNo, msg: `Group "${gCodeRaw}": missing Item Code` }); return; }
+
+        const key = norm(gCodeRaw);
+        if (!grouped.has(key)) {
+            grouped.set(key, { code: gCodeRaw, name: gNameRaw || gCodeRaw, uom: uomRaw || 'PCS', members: [], seen: new Set() });
+        }
+        const g = grouped.get(key);
+        if (gNameRaw && !g.name) g.name = gNameRaw;
+        if (uomRaw && !g.uom) g.uom = uomRaw;
+
+        const item = itemByCode.get(norm(iCodeRaw));
+        if (!item) {
+            warnings.push({ line: rowNo, msg: `SKU "${iCodeRaw}" not in Item Master — skipped` });
+            return;
+        }
+        if (g.seen.has(item.id)) return;   // dedupe
+        g.seen.add(item.id);
+        g.members.push({ itemId: item.id, itemCode: item.code, itemName: item.name });
+    });
+
+    const groups = [...grouped.values()]
+        .filter(g => g.members.length >= 2)
+        .map(g => ({ code: g.code, name: g.name, uom: g.uom, members: g.members }));
+
+    // Warn on UOM mismatch within group
+    groups.forEach(g => {
+        const bad = g.members.filter(m => {
+            const it = getItem(m.itemId);
+            return it && norm(it.uom) !== norm(g.uom);
+        });
+        if (bad.length > 0) {
+            warnings.push({ line: 0, msg: `Group "${g.code}": UOM mismatch for ${bad.map(b=>b.itemCode).join(', ')}` });
+        }
+    });
+
+    _groupImportParsed = { groups, errors, warnings, filename };
+
+    const sample = groups.slice(0, 5);
+    document.getElementById('groupImpPreview').innerHTML = `
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 12px;font-size:13px;margin-bottom:10px">
+            <b>File:</b> ${esc(filename)} · <span class="green"><b>${groups.length}</b> groups</span>
+            · <span class="green"><b>${groups.reduce((s,g)=>s+g.members.length,0)}</b> members</span>
+            ${warnings.length > 0 ? ` · <span class="orange">${warnings.length} warnings</span>` : ''}
+            ${errors.length > 0 ? ` · <span class="red">${errors.length} errors</span>` : ''}
+        </div>
+        ${sample.length > 0 ? `<div style="max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+            <table style="font-size:12px"><thead><tr><th>Code</th><th>Name</th><th>UOM</th><th>Members</th></tr></thead>
+            <tbody>${sample.map(g => `<tr><td><b>${esc(g.code)}</b></td><td>${esc(g.name)}</td><td>${esc(g.uom)}</td><td>${g.members.map(m=>esc(m.itemCode)).join(', ')}</td></tr>`).join('')}</tbody></table>
+        </div>` : ''}
+        ${errors.length > 0 ? `<div style="margin-top:10px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px;font-size:12px;max-height:150px;overflow-y:auto">
+            <b style="color:#b91c1c">Errors:</b>${errors.slice(0, 25).map(e => `<div>Line ${e.line}: ${esc(e.msg)}</div>`).join('')}</div>` : ''}
+        ${warnings.length > 0 ? `<div style="margin-top:10px;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:10px;font-size:12px;max-height:150px;overflow-y:auto">
+            <b style="color:#92400e">Warnings:</b>${warnings.slice(0, 25).map(e => `<div>${e.line ? 'Line '+e.line+': ' : ''}${esc(e.msg)}</div>`).join('')}</div>` : ''}
+    `;
+    const btn = document.getElementById('groupImpConfirmBtn');
+    if (btn) btn.disabled = groups.length === 0;
+}
+
+async function confirmGroupImport(){
+    if (!_groupImportParsed) { toast('No file loaded', 'error'); return; }
+    const { groups } = _groupImportParsed;
+    if (groups.length === 0) { toast('No valid groups', 'error'); return; }
+    const mode = document.getElementById('groupImpMode').value;
+    if (mode === 'replace') {
+        if (!confirm(`⚠ REPLACE ALL: DELETE all ${(DB.itemGroups||[]).length} groups then import ${groups.length}?`)) return;
+        if (!confirm('This cannot be undone. Really proceed?')) return;
+    }
+    const btn = document.getElementById('groupImpConfirmBtn');
+    btn.disabled = true; btn.textContent = 'Importing…';
+
+    try {
+        // Replace mode: clear all
+        if (mode === 'replace') {
+            const { error } = await SB.from('item_groups').delete().neq('id', '___never___');
+            if (error) throw error;
+            DB.itemGroups = [];
+        }
+
+        const byCode = new Map();
+        (DB.itemGroups || []).forEach(g => byCode.set(norm(g.code), g));
+
+        let inserted = 0, updated = 0, skipped = 0, failed = 0;
+
+        // Clean slate for member allocation: also clear members from
+        // items that are about to be reassigned.
+        for (const g of groups) {
+            const key = norm(g.code);
+            const existing = byCode.get(key);
+
+            if (mode === 'add' && existing) { skipped++; continue; }
+
+            // Remove any other group already holding one of these items (only in 'update')
+            if (mode === 'update') {
+                const itemIds = new Set(g.members.map(m => m.itemId));
+                for (const og of DB.itemGroups) {
+                    if (og.id === (existing ? existing.id : '')) continue;
+                    const filtered = (og.members || []).filter(m => !itemIds.has(m.itemId));
+                    if (filtered.length !== (og.members || []).length) {
+                        og.members = filtered;
+                        try { await DataLayer.updateGroup(og.id, og); } catch(e){}
+                    }
+                }
+            }
+
+            if (existing) {
+                existing.name = g.name;
+                existing.uom = g.uom;
+                existing.members = g.members.map(m => ({ itemId: m.itemId, itemCode: m.itemCode, itemName: m.itemName }));
+                try { await DataLayer.updateGroup(existing.id, existing); updated++; }
+                catch(err) { failed++; }
+            } else {
+                const rec = {
+                    id: nextGroupId(),
+                    code: g.code,
+                    name: g.name,
+                    uom: g.uom,
+                    status: 'Active',
+                    members: g.members.map(m => ({ itemId: m.itemId, itemCode: m.itemCode, itemName: m.itemName }))
+                };
+                try {
+                    await DataLayer.insertGroup(rec);
+                    DB.itemGroups.push(rec);
+                    byCode.set(key, rec);
+                    inserted++;
+                } catch(err) { failed++; }
+            }
+        }
+
+        _groupImportParsed = null;
+        closeModal();
+        toast(`Imported ${inserted} new + ${updated} updated${failed > 0 ? `, ${failed} failed` : ''}`, failed > 0 ? 'error' : 'success');
+        showPage('groups');
+    } catch(err) {
+        btn.disabled = false; btn.textContent = 'Import';
+        toast('Import failed: ' + (err.message || err), 'error');
+    }
+}
+
 let _bomImportParsed = null;
 function openBOMImportModal(){
     if (!can('createBOM')) { toast('Admin only.', 'error'); return; }
@@ -5367,12 +5974,14 @@ async function submitAcknowledgment(){
     const showRemark = (stage === 'acknowledged') && !isEdit;
 
     const q = (document.getElementById('vSearch')?.value || '').toLowerCase().trim();
-    let rows = j.lines.map((l, idx) => {
+        let rows = j.lines.map((l, idx) => {
         const it = getItem(l.itemId);
+        const isGroup = !!l.isGroup || !!getGroupById(l.itemId);
+        const g = isGroup ? getGroupById(l.itemId) : null;
         return {
             idx,
-            code: it ? it.code : (l.itemCode || ''),
-            name: it ? it.name : (l.itemName || 'Unknown'),
+            code: it ? it.code : (l.itemCode || (g ? g.code : '')),
+            name: it ? it.name : (l.itemName || (g ? g.name : 'Unknown')),
             uom: l.uom,
             opening: l.opening,
             received: l.received || 0,
@@ -5380,7 +5989,9 @@ async function submitAcknowledgment(){
             expected: l.expected,
             physical: l.physical,
             variance: l.variance || 0,
-            store_remark: l.storeRemark || l.store_remark || ''
+            store_remark: l.storeRemark || l.store_remark || '',
+            isGroup: isGroup,
+            groupMembers: l.groupMembers || (g ? (g.members || []).map(m => m.itemCode) : [])
         };
     });
 
@@ -5395,10 +6006,15 @@ async function submitAcknowledgment(){
     });
 
     const colspan = isEdit ? 8 : (showRemark ? 10 : 9);
-
-        document.getElementById('viewCountBody').innerHTML = rows.map(r => {
+    document.getElementById('viewCountBody').innerHTML = rows.map(r => {
         const v = r.variance;
         const vClass = v > 0 ? 'green' : v < 0 ? 'red' : '';
+
+        const groupInfo = r.isGroup
+            ? ` <span title="${esc((r.groupMembers||[]).length)} SKUs: ${esc((r.groupMembers||[]).join(', '))}"
+                     style="font-size:11px;color:#6b7280;cursor:help">ⓘ</span>`
+            : '';
+
         const physicalCell = isEdit
             ? `<input type="number" step="0.01"
                       value="${r.physical ?? ''}"
