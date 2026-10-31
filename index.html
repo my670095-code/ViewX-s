@@ -3106,13 +3106,30 @@ async function saveUser(editId){
         if (u.username === 'admin' && (username !== 'admin' || role !== 'admin')) {
             toast('Cannot change admin username or role', 'error'); return;
         }
-        u.username = username;
+            u.username = username;
         if (password) u.pass = password;
         u.name = name; u.initials = initials; u.role = role;
         if (role === 'store') { u.storeId = document.getElementById('uStore').value || null; }
-        else { delete u.storeId; }
-        audit('UPDATE','user',u.id,{ username, role });
-        saveData(); closeModal(); toast('User updated', 'success');
+        else { u.storeId = null; }
+
+        try {
+            if (CLOUD_MODE === 'supabase') {
+                const { error: eP } = await SB.from('profiles').update({
+                    name: name,
+                    initials: initials,
+                    role: role,
+                    store_id: u.storeId
+                }).eq('id', u.id);
+                if (eP) throw eP;
+            }
+            audit('UPDATE','user',u.id,{ username, role });
+            saveData(); 
+            closeModal(); 
+            toast('User updated', 'success');
+        } catch(err) {
+            toast('Failed to save user: ' + (err.message || err), 'error');
+            return; // Stop here if the DB update failed
+        }
         if (u.id === currentUser()?.id) {
             document.getElementById('userName').textContent = u.name;
             document.getElementById('userRole').textContent = ROLE_LABEL[u.role] || u.role;
