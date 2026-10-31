@@ -5957,19 +5957,22 @@ async function submitAcknowledgment(){
     j.acknowledgedByName = u.name;
     j.acknowledgedAt = now;
 
-    try {
-        if (CLOUD_MODE === 'supabase') {
-            // Update journal header
-            const { error: eH } = await SB.from('journals').update({
-                audit_stage: 'acknowledged',
-                action_plan: plan,
-                action_plan_by: u.name,
-                action_plan_at: now,
-                acknowledged_by_id: u.id,
-                acknowledged_by_name: u.name,
-                acknowledged_at: now
-            }).eq('id', j.id);
-            if (eH) throw eH;
+   try {
+    if (CLOUD_MODE === 'supabase') {
+        const { data: updated, error: eH } = await SB.from('journals').update({
+            audit_stage: 'acknowledged',
+            action_plan: plan,
+            action_plan_by: u.name,
+            action_plan_at: now,
+            acknowledged_by_id: u.id,
+            acknowledged_by_name: u.name,
+            acknowledged_at: now
+        }).eq('id', j.id).select('id');
+
+        if (eH) throw eH;
+        if (!updated || updated.length === 0) {
+            throw new Error('Journal update matched 0 rows — an RLS policy is blocking store users from updating journals. Contact admin.');
+        }
 
             // Update lines with store remarks
             for (const line of j.lines) {
